@@ -1,0 +1,43 @@
+# ParseOS SOP Engine — .gitignore
+
+# ── API keys and secrets ──────────────────────────────────────────────────────
+.env
+
+# ── Generated data (large, reproducible) ─────────────────────────────────────
+chroma_storage/
+knowledge_layer/
+
+# ── Python cache ─────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+parseos_env/
+venv/
+env/
+.venv/
+
+# ── Model cache (sentence-transformers downloads here) ───────────────────────
+.cache/
+~/.cache/
+
+# ── IDE files ─────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS files ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Test outputs ──────────────────────────────────────────────────────────────
+*.log
+test_output/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
