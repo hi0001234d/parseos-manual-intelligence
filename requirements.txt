@@ -1,0 +1,29 @@
+# ── PDF Parsing ──────────────────────────────────────────────────────────────
+pymupdf>=1.24.0
+
+# ── LlamaIndex (core framework) ───────────────────────────────────────────────
+llama-index-core>=0.10.0
+llama-index-embeddings-huggingface>=0.2.0
+llama-index-vector-stores-chroma>=0.1.0
+llama-index-llms-openai>=0.1.0
+llama-index-llms-openrouter>=0.1.0
+llama-index-readers-file>=0.1.0
+
+# ── Embeddings (used by llama-index-embeddings-huggingface) ───────────────────
+sentence-transformers>=2.7.0
+
+# ── Vector DB ────────────────────────────────────────────────────────────────
+chromadb>=0.5.0
+
+# ── LLM / API ─────────────────────────────────────────────────────────────────
+openai>=1.30.0
+
+# ── Web framework (future API layer) ─────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+numpy>=1.26.0
+colorama>=0.4.6
+tqdm>=4.66.0
