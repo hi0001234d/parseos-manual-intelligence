@@ -52,6 +52,12 @@ class SearchResult:
     score:       float = 0.0
     page_num:    int = -1
     image_path:  str = ""
+    is_layout:   bool = False
+    is_ocr:      bool = False
+    # Semantic flags derived from ingestion metadata
+    contains_diagram: bool = False
+    contains_table:   bool = False
+    contains_formula: bool = False
     similarity:  float = field(init=False)
 
     def __post_init__(self) -> None:
@@ -104,9 +110,11 @@ class SearchEngine:
     def _get_embed_model(self):
         if self._embed_model is None:
             from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+            # Use local files only to avoid network calls during embedding model loading
             self._embed_model = HuggingFaceEmbedding(
                 model_name=self._embed_model_name,
                 embed_batch_size=64,
+                model_kwargs={"local_files_only": True},
             )
         return self._embed_model
 
@@ -268,9 +276,19 @@ class SearchEngine:
                     score=score,
                     page_num=int(meta.get("page", -1)),
                     image_path=meta.get("image_path", ""),
+                    is_layout=bool(meta.get("layout_parsed", False)),
+                    is_ocr=bool(meta.get("ocr_used", False)),
+                    contains_diagram=bool(meta.get("contains_diagram", False)),
+                    contains_table=bool(meta.get("contains_table", False)),
+                    contains_formula=bool(meta.get("contains_formula", False)),
                 )
             )
 
+        # Debug: Log semantic flags for each retrieved chunk
+        for r in results:
+            print(f"[Engine] Chunk {r.chunk_index} | diagram:{r.contains_diagram} table:{r.contains_table} formula:{r.contains_formula} image_path:{bool(r.image_path)}")
+
+        # Sort results by distance (closest first)
         results.sort(key=lambda r: r.distance)
         return results
 
