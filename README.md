@@ -1,3 +1,4 @@
+--------------------------------------------------------------------------
 <!--
   TODO before publishing:
     - Replace <your-username> in the clone URL with the real GitHub org/user.
@@ -6,14 +7,14 @@
 
 # ParseOS Manual Intelligence
 
-### The industrial knowledge engine for ParseOS
+### An AI engine that turns industrial manuals into structured, queryable procedures
 
-> Manual Intelligence reads industrial machine manuals (PDFs) and turns them into structured, machine-readable Standard Operating Procedures (SOPs). It is the reasoning layer — the **brain** — of the ParseOS platform.
+> Manual Intelligence reads industrial machine manuals (PDFs) and turns them into structured, machine-readable Standard Operating Procedures (SOPs). It is the reasoning layer — the **brain** — behind this system.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Status](https://img.shields.io/badge/status-prototype-orange)
 ![Pipeline](https://img.shields.io/badge/pipeline-RAG-purple)
-![LLM](https://img.shields.io/badge/LLM-OpenAI%20%7C%20Claude-9cf)
+![LLM](https://img.shields.io/badge/LLM-OpenAI%20%7C%20Gemini%20%7C%20OpenRouter-9cf)
 ![License](https://img.shields.io/badge/license-TBD-lightgrey)
 
 ---
@@ -30,7 +31,7 @@ Manual Intelligence replaces that manual search with instant, structured guidanc
 
 ## What it actually is
 
-Manual Intelligence is **not** a chatbot and **not** a document search tool. It is a **structured knowledge extraction engine**.
+Manual Intelligence is **not** a chatbot and **not** a plain document search tool. It is a **structured knowledge extraction engine**.
 
 The real asset it produces is the **Knowledge Layer**: a growing library of machine-readable SOPs, each one a unit of industrial intelligence that downstream systems can query.
 
@@ -38,15 +39,15 @@ The real asset it produces is the **Knowledge Layer**: a growing library of mach
 
 ## How it works
 
-Manual Intelligence is a retrieval-augmented generation (RAG) pipeline. A manual goes in; structured, queryable knowledge comes out.
+Manual Intelligence is a retrieval-augmented generation (RAG) pipeline, built on LlamaIndex. A manual goes in; structured, queryable knowledge comes out.
 
 ```mermaid
 flowchart TD
-    A([PDF Manual]) --> B[Text Extraction]
+    A([PDF Manual]) --> B[Text Extraction + OCR / Vision fallback]
     B --> C[Chunking]
     C --> D[Embeddings]
     D --> E[(Vector DB - ChromaDB)]
-    Q([User Query]) --> S[Semantic Search]
+    Q([User Query]) --> S[Semantic Search - LlamaIndex Retriever]
     E --> S
     S --> L[LLM Reasoning]
     L --> J[/Structured SOP - JSON/]
@@ -57,12 +58,12 @@ flowchart TD
 
 | Stage | What it does | Tool |
 |:------|:-------------|:-----|
-| **1 · Extract** | Pull raw text from every page of the manual | PyMuPDF |
-| **2 · Chunk** | Split text into overlapping, meaning-sized pieces | Custom splitter |
-| **3 · Embed** | Convert each chunk into a 384-dim vector | sentence-transformers |
-| **4 · Store** | Index vectors for semantic search | ChromaDB |
-| **5 · Search** | Retrieve the most relevant manual sections for a query | ChromaDB query |
-| **6 · Reason** | An LLM extracts structured SOP steps from those sections | OpenAI / Claude |
+| **1 · Extract** | Pull text from every page; pages with diagrams/tables/formulas go through a vision model, scanned pages fall back to OCR | PyMuPDF, Gemini Vision, Tesseract OCR |
+| **2 · Chunk** | Split text into overlapping, meaning-sized pieces | LlamaIndex `SentenceSplitter` |
+| **3 · Embed** | Convert each chunk into a 384-dim vector | sentence-transformers (`all-MiniLM-L6-v2`) |
+| **4 · Store** | Index vectors for semantic search | ChromaDB (local persistent) |
+| **5 · Search** | Retrieve the most relevant manual sections for a query | LlamaIndex `VectorIndexRetriever` |
+| **6 · Reason** | An LLM extracts structured SOP steps from those sections (with the page image attached when a formula, table, or diagram is involved) | OpenAI GPT-4o / Google Gemini / OpenRouter |
 | **7 · Knowledge Layer** | Enrich and persist each SOP with metadata | JSON store |
 
 ---
@@ -73,15 +74,16 @@ flowchart TD
 |-----------|----------------|---------|
 | Language | Python 3.10+ | Core of every component |
 | PDF parsing | PyMuPDF (`fitz`) | Extract raw text from each page |
-| Text chunking | Custom Python | Split text into meaningful pieces |
+| Vision fallback | Gemini Vision (or configured VLM) | Transcribe diagrams, formulas, and tables from page images |
+| OCR fallback | Tesseract (`pytesseract`) | Extract text from scanned pages that have no selectable text |
+| Text chunking | LlamaIndex `SentenceSplitter` | Split text into meaningful pieces |
 | Embeddings | sentence-transformers (`all-MiniLM-L6-v2`) | Text → semantic vectors |
 | Vector database | ChromaDB | Store and search vectors by similarity |
-| LLM reasoning | OpenAI GPT-4 **or** Anthropic Claude | Extract structured SOP steps |
+| LLM reasoning | OpenAI GPT-4o, Google Gemini, or OpenRouter | Extract structured SOP steps |
 | API layer | FastAPI *(planned)* | Serve the engine as a web API |
 | Frontend | React.js *(planned)* | Upload manuals and run queries |
 | Data format | JSON | Output format for every SOP |
 
-> **Provider-agnostic LLM.** The reasoning stage runs on **either OpenAI GPT-4 or Anthropic Claude**. Pick the provider in your `.env` (`LLM_PROVIDER`) — no code changes needed. See [Configuration](#configuration).
 
 ---
 
@@ -96,20 +98,22 @@ parseos-manual-intelligence/
 │       └── ...
 │
 ├── src/
-│   ├── pdf_parser.py            # Stage 1: Text extraction
-│   ├── chunker.py               # Stage 2: Text chunking
-│   ├── embedding_engine.py      # Stage 3: Generate embeddings
-│   ├── vector_store.py          # Stage 4: ChromaDB operations
-│   ├── search_engine.py         # Stage 5: Semantic search
-│   ├── sop_extractor.py         # Stage 6: LLM SOP extraction
-│   └── knowledge_layer.py       # Stage 7: Knowledge storage
+│   ├── config.py                 # Central config, loads .env
+│   ├── pdf_parser.py             # Stage 1: Text extraction (+ OCR / Vision fallback)
+│   ├── engine.py                 # Stages 2-5: Chunking, embeddings, ChromaDB, search (LlamaIndex)
+│   ├── sop_extractor.py          # Stage 6: LLM SOP extraction
+│   ├── knowledge_layer.py        # Stage 7: Knowledge storage
+│   ├── api_retry.py              # Retry/backoff helper for API calls
+│   └── chat_formatter.py         # Formats SOP output for the interactive chat mode
 │
-├── chroma_storage/              # Auto-created by ChromaDB
-├── knowledge_layer/             # Auto-created: JSON SOP files
+├── chroma_storage/               # Auto-created by ChromaDB
+├── knowledge_layer/               # Auto-created: JSON SOP files
 │
-├── parseos_pipeline.py          # Master runner (full pipeline)
-├── requirements.txt             # All dependencies
-├── .env                         # API keys (never commit)
+├── parseos_pipeline.py            # Master runner (CLI + interactive chat mode)
+├── ingest_all.py                  # Batch-ingest every PDF in data/manuals/
+├── verify.py                      # Milestone verification, stage by stage
+├── requirements.txt                # All dependencies
+├── .env                            # API keys (never commit)
 ├── .gitignore
 └── README.md
 ```
@@ -137,25 +141,17 @@ parseos_env\Scripts\activate         # Windows
 pip install -r requirements.txt
 ```
 
-No `requirements.txt` yet? Install directly:
-
-```bash
-pip install pymupdf sentence-transformers chromadb fastapi uvicorn langchain
-pip install openai        # if using OpenAI
-pip install anthropic     # if using Claude
-```
+> To enable OCR fallback for scanned pages, also install `pytesseract` and `Pillow`, and have the Tesseract-OCR binary available on your system.
 
 ### 3. Configure your provider and key
 
 Create a `.env` file in the project root:
 
 ```bash
-# Choose the LLM provider: "openai" or "claude"
-LLM_PROVIDER=claude
-
-# Provide the key for whichever provider you use
+# Provide at least one key — checked in this order: Gemini, then OpenRouter, then OpenAI
+GEMINI_API_KEY=your_key_here
+OPENROUTER_API_KEY=your_key_here
 OPENAI_API_KEY=your_key_here
-ANTHROPIC_API_KEY=your_key_here
 ```
 
 > The embedding model (`all-MiniLM-L6-v2`, ~90MB) downloads automatically on first run.
@@ -172,19 +168,23 @@ Set these in your `.env` (or as environment variables):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `claude` | `openai` or `claude` |
-| `OPENAI_API_KEY` | — | Required if provider is `openai` |
-| `ANTHROPIC_API_KEY` | — | Required if provider is `claude` |
+| `GEMINI_API_KEY` | — | Checked first for Stage 6 LLM extraction |
+| `OPENROUTER_API_KEY` | — | Checked second |
+| `OPENAI_API_KEY` | — | Checked third |
+| `LLM_MODEL` | `gpt-4o` | Model used for SOP extraction |
+| `INGEST_VLM_MODEL` | `gpt-4o-mini` | Vision model used to transcribe diagrams/tables/formulas at ingest time |
+| `USE_LAYOUT_PARSER` | `True` | Enables the vision-based page transcription during ingestion |
 | `CHUNK_SIZE` | `400` | Words per chunk |
 | `CHUNK_OVERLAP` | `50` | Overlapping words between chunks |
 | `TOP_K_RESULTS` | `3` | Number of search results retrieved |
 | `EMBED_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model |
+| `IMAGE_HEAVY_THRESHOLD` | `4` | Max page images sent to the vision model in a single query |
 
 ---
 
 ## Usage
 
-Run the full pipeline on any manual, from PDF to Knowledge Layer, in a single command:
+Run the full pipeline on a single manual, from PDF to Knowledge Layer:
 
 ```bash
 python parseos_pipeline.py \
@@ -193,25 +193,40 @@ python parseos_pipeline.py \
   --category manufacturing
 ```
 
-The runner walks through all stages and prints the final structured SOP (example):
+The runner prints progress in two blocks and then the final structured SOP:
 
 ```
-[1/7] Extracting text from: data/manuals/weg_motor_manual.pdf
-[2/7] Chunking text...
-[3+4/7] Embedding and storing N chunks...
-[5/7] Searching for: motor bearing overheating maintenance
-[6/7] Extracting SOP with LLM...
-[7/7] Saving to Knowledge Layer...
+──────────────────────────────────────────────
+  INGESTION PIPELINE (Stages 1–4)
+──────────────────────────────────────────────
+[1/1] Ingesting manual via LlamaIndex IngestionPipeline …
 
-=== COMPLETE ===
+──────────────────────────────────────────────
+  QUERY PIPELINE (Stages 5–7)
+──────────────────────────────────────────────
+[1/3] Semantic search (LlamaIndex): '...'
+[2/3] Extracting SOP with LlamaIndex LLM (...)
+[3/3] Saving to Knowledge Layer …
 ```
 
-**Ingest all manuals (batch).** The runner processes one manual per call. To ingest a folder, loop over it:
+Other useful modes:
 
 ```bash
-for pdf in data/manuals/*.pdf; do
-  python parseos_pipeline.py --manual "$pdf" --query "maintenance procedure" --category manufacturing
-done
+# Ingest only (stages 1-4, no LLM call)
+python parseos_pipeline.py --manual data/manuals/weg_motor_manual.pdf --ingest-only
+
+# Query only, manual already ingested (stages 5-7)
+python parseos_pipeline.py --query "motor overheating fix" --category manufacturing --query-only
+
+# Interactive chat mode
+python parseos_pipeline.py --chat
+```
+
+**Batch ingestion.** To ingest every PDF in `data/manuals/` in one go:
+
+```bash
+python ingest_all.py
+python ingest_all.py --force   # re-ingest even if already stored
 ```
 
 ---
@@ -250,53 +265,29 @@ A query like *"motor bearing overheating maintenance"* returns a structured SOP 
 }
 ```
 
-In the Knowledge Layer, each SOP is enriched further with a unique ID, source manual, normalized machine type, industry category, trigger keywords, overall risk level, and `telemetry_triggers` — the hook that lets future systems connect live machine signals to the right procedure.
-
----
-
-## Where it fits in ParseOS
-
-Manual Intelligence is the first of three layers in the ParseOS vision. It is the foundation everything else connects to.
-
-| Layer | Component | Role |
-|-------|-----------|------|
-| **Brain** | **Manual Intelligence** (this repo) | Manuals → structured knowledge |
-| **Eyes** | Project 3 | Telemetry → anomaly detection |
-| **Hands** | ParseOS | Assisted execution guidance |
-
-Once the Knowledge Layer is populated, telemetry-driven systems can close the loop automatically:
-
-```mermaid
-flowchart TD
-    T["Machine telemetry: temp 102C, vibration 8.2"] --> A["Anomaly detected: exceeds 95C threshold"]
-    A --> Q["Knowledge Layer query: motor overheating fix"]
-    Q --> R["SOP retrieved: KL_weg_motor_001.json"]
-    R --> O["Operator display: Step 1 - Shut down motor"]
-```
-
-This is why every field in the Knowledge Layer schema matters — the `telemetry_triggers` field is the bridge to that next layer.
+In the Knowledge Layer, each SOP is enriched further with a unique ID, source manual, industry category, trigger keywords, overall risk level, and a `telemetry_triggers` placeholder field for future use.
 
 ---
 
 ## Supported manuals
 
-Manual Intelligence is designed to work with ten real, publicly available industrial manuals across six industrial sectors.
+Manual Intelligence is designed to work with ten real, publicly available industrial manuals across many industrial sectors.
 
 <details>
 <summary>View the full manual list</summary>
 
 | # | Manual | Industry | Device |
 |---|--------|----------|--------|
-| 1 | WEG W22 Electric Motor | Manufacturing | Electric Motor |
-| 2 | TECO Westinghouse Motor | Manufacturing | 3-Phase Motor |
-| 3 | Piggott Wind Turbine | Energy & Utilities | Small Wind Turbine |
-| 4 | WES80 Wind Turbine | Energy & Utilities | Medium Wind Turbine |
-| 5 | DOE Pump Sourcebook | Equipment Maintenance | Industrial Pumps |
-| 6 | USFS Hand Pump Manual | Equipment Maintenance | Hand Pump |
-| 7 | Universal Robots UR5 | Robotics & Assembly | Collaborative Robot |
-| 8 | Fanuc CNC 30i | Robotics & Assembly | CNC Machine |
-| 9 | NASA MOD-2 Turbine | Aerospace | Wind/Energy System |
-| 10 | Siemens S7-1200 PLC | Industrial Control | PLC Controller |
+| 1 | ABB IRB 120 | Robotics & Assembly | Industrial Robot |
+| 2 | Atlas Copco Compressed Air | Equipment Maintenance | Compressed Air System |
+| 3 | Fisher EZ Easy-E Control Valve | Process Control | Control Valve |
+| 4 | Grundfos CR-CRN Multistage Pump | Equipment Maintenance | Multistage Centrifugal Pump |
+| 5 | Haas Mill | Manufacturing | CNC Milling Machine |
+| 6 | Maintenance Manual v3.2.1 | Equipment Maintenance | Industrial Equipment |
+| 7 | TECO Westinghouse Motor | Manufacturing | Electric Motor |
+| 8 | Industrial Pump | Equipment Maintenance | Industrial Pump |
+| 9 | Siemens S7-1200 PLC | Industrial Automation | PLC Controller |
+| 10 | Universal Robots UR5 | Robotics & Assembly | Collaborative Robot |
 
 All manuals are publicly available from their respective manufacturers, government sources, or public archives. They are **not** redistributed in this repo — download them into `data/manuals/`.
 
@@ -306,9 +297,9 @@ All manuals are publicly available from their respective manufacturers, governme
 
 ## Limitations
 
-- **Scanned-image PDFs** return empty text — they need OCR (`pip install pytesseract`) before extraction works.
+- **Scanned or image-heavy pages** rely on the OCR/vision fallback, which needs `pytesseract` + the Tesseract binary installed (for OCR) and a working API key (for the vision transcription step) — without those, such pages may still return empty text.
 - **FastAPI service** and **React UI** are planned, not yet implemented.
-- The runner processes **one manual per call** — use the batch loop above to ingest many.
+- Vision-model calls are capped per query (`IMAGE_HEAVY_THRESHOLD`) to stay within free-tier API quotas, so very diagram-heavy queries may only get partial visual context.
 
 ---
 
@@ -330,4 +321,4 @@ _Not yet chosen._ Pick a license before the public release — MIT is a common d
 
 ---
 
-<sub>ParseOS · Manual Intelligence — building the brain first. Everything else connects to it later.</sub>
+<sub>Manual Intelligence — a research prototype, built stage by stage.</sub>
