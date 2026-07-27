@@ -1,7 +1,9 @@
 """
-ingest_all.py — Batch Ingestion Script (LlamaIndex Native)
-===========================================================
+ingest_all.py — Batch Ingestion Script (LlamaIndex Native v2.0)
+===============================================================
 Reads all PDF files from data/manuals/ and ingests them into ChromaDB using LlamaIndex.
+In v2.0, ingestion is 100% TEXT-ONLY (zero VLM calls upfront). Visual pages are pre-rendered
+and flagged for query-time processing.
 
 Usage:
   python ingest_all.py                     # ingest all manuals
@@ -13,6 +15,9 @@ import os
 import sys
 import time
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -27,7 +32,7 @@ def ingest_manual(
     verbose: bool = False,
 ) -> dict:
     """
-    Runs Stages 2-4 for a single PDF manual via LlamaIndex.
+    Runs Stages 1-4 for a single PDF manual via LlamaIndex text-only v2.0 ingestion.
     """
     manual_name = Path(pdf_path).stem
     result = {
@@ -49,16 +54,16 @@ def ingest_manual(
 
         elapsed = time.time() - t0
         result["status"] = "ok"
-        print(f"  ✓  {manual_name}: {pages} pages | {count} chunks | {elapsed:.1f}s")
+        print(f"  [OK] {manual_name}: {pages} pages | {count} chunks | {elapsed:.1f}s")
 
     except FileNotFoundError:
         result["status"] = "missing"
         result["error"]  = "File not found"
-        print(f"  ✗  {manual_name}: File not found at {pdf_path}")
+        print(f"  [FAIL] {manual_name}: File not found at {pdf_path}")
     except Exception as e:
         result["status"] = "error"
         result["error"]  = str(e)
-        print(f"  ✗  {manual_name}: {e}")
+        print(f"  [FAIL] {manual_name}: {e}")
 
     return result
 
@@ -75,18 +80,18 @@ def main():
                         help=f"Directory containing PDFs (default: {MANUALS_PATH}).")
     args = parser.parse_args()
 
-    print("\n" + "═" * 60)
-    print("  ParseOS — LlamaIndex Batch Manual Ingestion")
-    print("═" * 60)
+    print("\n" + "=" * 60)
+    print("  ParseOS -- LlamaIndex Batch Manual Ingestion (v2.0)")
+    print("=" * 60)
 
     manuals_dir = Path(args.manuals_dir)
     if not manuals_dir.exists():
-        print(f"\n✗ Manuals directory not found: {manuals_dir}")
+        print(f"\n[FAIL] Manuals directory not found: {manuals_dir}")
         sys.exit(1)
 
     pdfs = sorted(manuals_dir.glob("*.pdf"))
     if not pdfs:
-        print(f"\n✗ No PDF files found in: {manuals_dir}")
+        print(f"\n[FAIL] No PDF files found in: {manuals_dir}")
         sys.exit(1)
 
     print(f"  Found {len(pdfs)} PDF file(s) in {manuals_dir}\n")
@@ -102,7 +107,7 @@ def main():
 
         if skip:
             count = store.get_manual_chunk_count(manual_name)
-            print(f"  –  {manual_name}: already stored ({count} chunks) — skipping")
+            print(f"  - {manual_name}: already stored ({count} chunks) -- skipping")
             results.append({"manual": manual_name, "status": "skipped", "chunks": count})
             continue
 
@@ -115,14 +120,14 @@ def main():
     skip_count = sum(1 for r in results if r["status"] == "skipped")
     err_count  = sum(1 for r in results if r["status"] in ("error", "missing"))
 
-    print("\n" + "─" * 60)
+    print("\n" + "-" * 60)
     print(f"  Ingestion complete in {total_time:.1f}s")
-    print(f"  ✓ Ingested : {ok_count}")
-    print(f"  – Skipped  : {skip_count}")
-    print(f"  ✗ Errors   : {err_count}")
+    print(f"  [OK] Ingested : {ok_count}")
+    print(f"  - Skipped     : {skip_count}")
+    print(f"  [FAIL] Errors : {err_count}")
     print(f"\n  Total chunks in DB: {store.total_chunks()}")
     print(f"  Manuals stored    : {store.list_manuals()}")
-    print("═" * 60 + "\n")
+    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":

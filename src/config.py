@@ -17,6 +17,7 @@ CHROMA_PATH     = str(_PROJECT_ROOT / "chroma_storage")
 KNOWLEDGE_PATH  = str(_PROJECT_ROOT / "knowledge_layer")
 MANUALS_PATH    = str(_PROJECT_ROOT / "data" / "manuals")
 PAGE_IMAGES_PATH = str(_PROJECT_ROOT / "data" / "page_images")
+VLM_CACHE_PATH   = str(_PROJECT_ROOT / "data" / "vlm_cache")
 
 # ── Embedding model ─────────────────────────────────────────────────────────
 EMBED_MODEL     = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
@@ -36,5 +37,9 @@ CHUNK_OVERLAP   = int(os.getenv("CHUNK_OVERLAP", "50"))
 # ── Search ───────────────────────────────────────────────────────────────────
 TOP_K_RESULTS   = int(os.getenv("TOP_K_RESULTS", "3"))
 
+# ── Vision Cap ───────────────────────────────────────────────────────────────
+IMAGE_HEAVY_THRESHOLD = int(os.getenv("IMAGE_HEAVY_THRESHOLD", "3"))
+
 # ── ChromaDB collection name ─────────────────────────────────────────────────
 CHROMA_COLLECTION = "manual_knowledge"
+

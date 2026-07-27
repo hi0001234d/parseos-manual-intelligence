@@ -1,19 +1,16 @@
 """
-engine.py — Unified LlamaIndex Engine for ParseOS SOP Engine
-=============================================================
+engine.py — Unified LlamaIndex Engine for ParseOS SOP Engine (v2.0)
+===================================================================
 Consolidates text splitting, embedding generation, vector database storage,
 and semantic query retrieval (Stages 2-5) using LlamaIndex.
 
-Architecture
-------------
-PDF Text (from pdf_parser.py)
-  └─ llama_index Document  (with metadata)
-      └─ IngestionPipeline
-          ├─ SentenceSplitter       (Stage 2)
-          ├─ HuggingFaceEmbedding   (Stage 3 — all-MiniLM-L6-v2)
-          └─ ChromaVectorStore      (Stage 4 — persistent local ChromaDB)
-              └─ VectorStoreIndex
-                  └─ VectorIndexRetriever (Stage 5)
+v2.0 Architectural Updates
+--------------------------
+- Ingestion operates page-by-page. Each page creates a LlamaIndex Document.
+  SentenceSplitter node parser propagates parent page metadata (page_num,
+  has_visual_content, visual_confidence, image_path) into every chunk node.
+- SearchResult exposes has_visual_content, visual_confidence, and image_path
+  for Stage 6a conditional visual processing.
 """
 
 from __future__ import annotations
@@ -35,7 +32,7 @@ from src.config import (
     CHUNK_OVERLAP,
     TOP_K_RESULTS,
 )
-from src.pdf_parser import extract_text_from_pdf, extract_text_with_metadata, get_page_count
+from src.pdf_parser import extract_text_with_metadata, get_page_count
 
 
 # ── SearchResult Dataclass ──────────────────────────────────────────────────
@@ -45,20 +42,17 @@ class SearchResult:
     """
     Represents a matching chunk retrieved from the vector database.
     """
-    chunk_text:  str
-    manual_name: str
-    chunk_index: int
-    distance:    float
-    score:       float = 0.0
-    page_num:    int = -1
-    image_path:  str = ""
-    is_layout:   bool = False
-    is_ocr:      bool = False
-    # Semantic flags derived from ingestion metadata
-    contains_diagram: bool = False
-    contains_table:   bool = False
-    contains_formula: bool = False
-    similarity:  float = field(init=False)
+    chunk_text:         str
+    manual_name:        str
+    chunk_index:        int
+    distance:           float
+    score:              float = 0.0
+    page_num:           int = -1
+    has_visual_content: bool = False
+    visual_confidence:  float = 0.0
+    image_path:         str = ""
+    is_ocr:             bool = False
+    similarity:         float = field(init=False)
 
     def __post_init__(self) -> None:
         self.similarity = round(1.0 - self.distance, 4)
@@ -66,7 +60,7 @@ class SearchResult:
     def __str__(self) -> str:
         return (
             f"[{self.manual_name} | chunk {self.chunk_index} | page {self.page_num}] "
-            f"similarity={self.similarity:.3f}\n"
+            f"sim={self.similarity:.3f} | visual={self.has_visual_content} ({self.visual_confidence})\n"
             f"{self.chunk_text[:200]}…"
         )
 
@@ -94,27 +88,20 @@ class SearchEngine:
         self._chunk_overlap    = chunk_overlap
 
         # Lazy initialized components
-        self._embed_model  = None
+        self._embed_model   = None
         self._chroma_client = None
-        self._collection    = None
-        self._vector_store  = None
-        self._index         = None
-
-    @property
-    def _store(self):
-        """Legacy helper: references self for total_chunks / check compatibility."""
-        return self
+        self._collection     = None
+        self._vector_store   = None
+        self._index          = None
 
     # ── Lazy initialization methods ──────────────────────────────────────────
 
     def _get_embed_model(self):
         if self._embed_model is None:
             from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-            # Use local files only to avoid network calls during embedding model loading
             self._embed_model = HuggingFaceEmbedding(
                 model_name=self._embed_model_name,
                 embed_batch_size=64,
-                model_kwargs={"local_files_only": True},
             )
         return self._embed_model
 
@@ -161,7 +148,7 @@ class SearchEngine:
         force: bool = False,
     ) -> int:
         """
-        Splits PDF text, generates vector embeddings, and stores them in ChromaDB.
+        Splits PDF text page-by-page, generates vector embeddings, and stores them in ChromaDB.
         """
         from llama_index.core import Document
         from llama_index.core.ingestion import IngestionPipeline
@@ -175,7 +162,7 @@ class SearchEngine:
             print(f"  [SearchEngine] '{manual_name}' already ingested ({count} chunks).")
             return count
 
-        print(f"  [SearchEngine] Extracting PDF text: {pdf_path}")
+        print(f"  [SearchEngine] Extracting PDF text (text-only v2.0): {pdf_path}")
         pages_count = get_page_count(pdf_path)
         pages_data  = extract_text_with_metadata(pdf_path)
 
@@ -187,13 +174,14 @@ class SearchEngine:
                 Document(
                     text=p["text"],
                     metadata={
-                        "manual":        manual_name,
-                        "source_path":   str(pdf_path),
-                        "page_count":    pages_count,
-                        "page":          p["page_num"],
-                        "image_path":    p.get("image_path", ""),
-                        "layout_parsed": p.get("layout_parsed", False),
-                        "ocr_used":      p.get("ocr_used", False),
+                        "manual":             manual_name,
+                        "source_path":        str(pdf_path),
+                        "page_count":         pages_count,
+                        "page":               p["page_num"],
+                        "has_visual_content": p.get("has_visual_content", False),
+                        "visual_confidence":  p.get("visual_confidence", 0.0),
+                        "image_path":         p.get("image_path", ""),
+                        "ocr_used":           p.get("ocr_used", False),
                     },
                 )
             )
@@ -213,7 +201,7 @@ class SearchEngine:
         )
 
         print(f"  [SearchEngine] Running IngestionPipeline for '{manual_name}' …")
-        nodes = pipeline.run(documents=documents, show_progress=True)
+        nodes = pipeline.run(documents=documents, show_progress=False)
 
         # Patch metadata indexes for backward compatibility checking
         for i, node in enumerate(nodes):
@@ -275,18 +263,12 @@ class SearchEngine:
                     distance=distance,
                     score=score,
                     page_num=int(meta.get("page", -1)),
+                    has_visual_content=bool(meta.get("has_visual_content", False)),
+                    visual_confidence=float(meta.get("visual_confidence", 0.0)),
                     image_path=meta.get("image_path", ""),
-                    is_layout=bool(meta.get("layout_parsed", False)),
                     is_ocr=bool(meta.get("ocr_used", False)),
-                    contains_diagram=bool(meta.get("contains_diagram", False)),
-                    contains_table=bool(meta.get("contains_table", False)),
-                    contains_formula=bool(meta.get("contains_formula", False)),
                 )
             )
-
-        # Debug: Log semantic flags for each retrieved chunk
-        for r in results:
-            print(f"[Engine] Chunk {r.chunk_index} | diagram:{r.contains_diagram} table:{r.contains_table} formula:{r.contains_formula} image_path:{bool(r.image_path)}")
 
         # Sort results by distance (closest first)
         results.sort(key=lambda r: r.distance)
@@ -349,13 +331,11 @@ def search_manual(
     top_k: int = TOP_K_RESULTS,
     filter_manual: str | None = None,
 ) -> tuple[list[str], list[dict], list[float]]:
-    """
-    Convenience shortcut matching standard project verification.
-    """
+    """Convenience shortcut matching standard project verification."""
     engine  = SearchEngine()
     results = engine.search(query, top_k=top_k, filter_manual=filter_manual)
 
     chunks    = [r.chunk_text  for r in results]
-    metas     = [{"manual": r.manual_name, "chunk_index": r.chunk_index} for r in results]
+    metas     = [{"manual": r.manual_name, "chunk_index": r.chunk_index, "page": r.page_num, "has_visual": r.has_visual_content} for r in results]
     distances = [r.distance    for r in results]
     return chunks, metas, distances

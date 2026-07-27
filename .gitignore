@@ -6,6 +6,8 @@
 # ── Generated data (large, reproducible) ─────────────────────────────────────
 chroma_storage/
 knowledge_layer/
+data/page_images/
+data/vlm_cache/
 
 # ── Python cache ─────────────────────────────────────────────────────────────
 __pycache__/
