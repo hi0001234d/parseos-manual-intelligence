@@ -26,8 +26,12 @@ EMBED_MODEL     = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
 OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 LLM_MODEL       = os.getenv("LLM_MODEL", "gpt-4o")
 INGEST_VLM_MODEL = os.getenv("INGEST_VLM_MODEL", "gpt-4o-mini")
+# claude-3-5-haiku is the fastest/cheapest Claude model with full vision support
+ANTHROPIC_MODEL     = os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+ANTHROPIC_VLM_MODEL = os.getenv("ANTHROPIC_VLM_MODEL", "claude-3-5-haiku-20241022")
 USE_LAYOUT_PARSER = os.getenv("USE_LAYOUT_PARSER", "True").lower() in ("true", "1", "yes")
 
 # ── Chunking ─────────────────────────────────────────────────────────────────
