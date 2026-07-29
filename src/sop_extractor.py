@@ -18,6 +18,8 @@ from pathlib import Path
 from PIL import Image
 from openai import OpenAI
 
+import requests
+
 from src.config import (
     IMAGE_HEAVY_THRESHOLD,
     VLM_CACHE_PATH,
@@ -29,9 +31,34 @@ from src.config import (
     INGEST_VLM_MODEL,
     ANTHROPIC_MODEL,
     ANTHROPIC_VLM_MODEL,
+    PREDICT_API_URL,
 )
 from src.api_retry import retry_with_backoff
 from src.engine import SearchResult
+
+
+# ── Predict Endpoint Client ───────────────────────────────────────────────────
+
+def predict_image_object(image_path: str, text: str, endpoint: str = PREDICT_API_URL) -> dict:
+    """
+    Calls local visual prediction API endpoint (e.g. http://192.168.0.128/predict)
+    using multipart/form-data with 'image' file and 'text' prompt fields.
+    
+    Equivalent to:
+      curl -X POST http://192.168.0.128/predict -F "image=@<image_path>" -F "text=<text>"
+    """
+    target_endpoint = endpoint or PREDICT_API_URL
+    try:
+        with open(image_path, "rb") as f:
+            files = {"image": (os.path.basename(image_path), f, "image/png")}
+            data = {"text": text}
+            response = requests.post(target_endpoint, files=files, data=data, timeout=30)
+            response.raise_for_status()
+            return response.json()
+    except Exception as err:
+        print(f"  [WARN] Predict API call to {target_endpoint} failed: {err}")
+        return {}
+
 
 
 # ── Multi-Provider Helper ─────────────────────────────────────────────────────

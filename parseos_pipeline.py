@@ -60,16 +60,28 @@ def run_pipeline(
         print(f"  [OK] Ingestion complete! {chunks_count} chunk nodes stored in ChromaDB.\n")
         return None
 
-    # Mode 2: Query only or Full Run
-    if query_only or (manual_path and query):
+    # Mode 2: Query execution (if --query or --query-only or full run with --manual)
+    if query_only or query or manual_path:
         if manual_path:
-            manual_name = Path(manual_path).stem
-            filter_manual = manual_name
-            if force_ingest or not engine.manual_exists(manual_name):
-                print(f"[Pipeline] Ingesting manual first: {manual_path}")
-                engine.ingest_manual(manual_path, force=force_ingest)
+            # Check if manual_path points to a PDF file on disk
+            if os.path.exists(manual_path) and os.path.isfile(manual_path):
+                manual_name = Path(manual_path).stem
+                filter_manual = manual_name
+                if force_ingest or not engine.manual_exists(manual_name):
+                    print(f"[Pipeline] Ingesting manual first: {manual_path}")
+                    engine.ingest_manual(manual_path, force=force_ingest)
+                else:
+                    print(f"[Pipeline] Using existing ingested index for manual: {manual_name}")
             else:
-                print(f"[Pipeline] Using existing ingested index for manual: {manual_name}")
+                # Treat manual_path as manual name or substring filter for ingested index
+                available_manuals = engine.list_manuals()
+                matched = None
+                for m in available_manuals:
+                    if manual_path.lower() in m.lower():
+                        matched = m
+                        break
+                filter_manual = matched or manual_path
+                print(f"[Pipeline] Filtering search by manual: '{filter_manual}'")
 
         if not query:
             raise ValueError("--query string required for query execution.")
@@ -165,9 +177,23 @@ def main():
 
     args = parser.parse_args()
 
-    if args.chat:
+    # Default to interactive chat mode if no CLI options specified
+    if args.chat or not (args.manual or args.query or args.ingest_only or args.query_only):
         run_interactive_chat()
     else:
+    # ---------- DEBUG MODE ----------
+        debug_manual = r"data/manuals/Maintenance-manual-v3.2.1-web.pdf"
+        debug_query = "motor overheating procedure"
+
+        run_pipeline(
+            manual_path=debug_manual,
+            query=debug_query,
+            category="manufacturing",
+            ingest_only=False,
+            query_only=False,
+            force_ingest=False,
+    )
+    """else:
         run_pipeline(
             manual_path=args.manual,
             query=args.query,
@@ -175,7 +201,7 @@ def main():
             ingest_only=args.ingest_only,
             query_only=args.query_only,
             force_ingest=args.force,
-        )
+        )"""
 
 
 if __name__ == "__main__":

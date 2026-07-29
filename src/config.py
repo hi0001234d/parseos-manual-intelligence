@@ -44,6 +44,9 @@ TOP_K_RESULTS   = int(os.getenv("TOP_K_RESULTS", "3"))
 # ── Vision Cap ───────────────────────────────────────────────────────────────
 IMAGE_HEAVY_THRESHOLD = int(os.getenv("IMAGE_HEAVY_THRESHOLD", "3"))
 
+# ── Local Visual Predictor API Endpoint ───────────────────────────────────────
+PREDICT_API_URL = os.getenv("PREDICT_API_URL", "http://192.168.0.128/predict")
+
 # ── ChromaDB collection name ─────────────────────────────────────────────────
 CHROMA_COLLECTION = "manual_knowledge"
 
