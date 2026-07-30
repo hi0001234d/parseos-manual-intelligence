@@ -181,7 +181,16 @@ def main():
     if args.chat or not (args.manual or args.query or args.ingest_only or args.query_only):
         run_interactive_chat()
     else:
-    # ---------- DEBUG MODE ----------
+        run_pipeline(
+            manual_path=args.manual,
+            query=args.query,
+            category=args.category,
+            ingest_only=args.ingest_only,
+            query_only=args.query_only,
+            force_ingest=args.force,
+        )
+
+    """ ---------- DEBUG MODE ----------
         debug_manual = r"data/manuals/Maintenance-manual-v3.2.1-web.pdf"
         debug_query = "motor overheating procedure"
 
@@ -193,16 +202,7 @@ def main():
             query_only=False,
             force_ingest=False,
     )
-    """else:
-        run_pipeline(
-            manual_path=args.manual,
-            query=args.query,
-            category=args.category,
-            ingest_only=args.ingest_only,
-            query_only=args.query_only,
-            force_ingest=args.force,
-        )"""
-
+    """
 
 if __name__ == "__main__":
     main()

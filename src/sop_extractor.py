@@ -39,7 +39,7 @@ from src.engine import SearchResult
 
 # ── Predict Endpoint Client ───────────────────────────────────────────────────
 
-def predict_image_object(image_path: str, text: str, endpoint: str = PREDICT_API_URL) -> dict:
+def predict_image_object(image_path: str, text: str, endpoint: str = PREDICT_API_URL) -> dict | str:
     """
     Calls local visual prediction API endpoint (e.g. http://192.168.0.128/predict)
     using multipart/form-data with 'image' file and 'text' prompt fields.
@@ -54,10 +54,37 @@ def predict_image_object(image_path: str, text: str, endpoint: str = PREDICT_API
             data = {"text": text}
             response = requests.post(target_endpoint, files=files, data=data, timeout=30)
             response.raise_for_status()
-            return response.json()
+            try:
+                return response.json()
+            except Exception:
+                return response.text
     except Exception as err:
         print(f"  [WARN] Predict API call to {target_endpoint} failed: {err}")
         return {}
+
+
+def extract_predict_text(res: Any) -> str:
+    """
+    Extracts prediction/analysis string from response payload returned by local predict API.
+    Handles dict with common keys ('prediction', 'extracted_data', 'result', 'description',
+    'output', 'text', 'message'), string payloads, or nested structures.
+    """
+    if not res:
+        return ""
+    if isinstance(res, str):
+        return res.strip()
+    if isinstance(res, dict):
+        for key in ("prediction", "extracted_data", "result", "description", "output", "text", "message"):
+            if key in res and isinstance(res[key], str) and res[key].strip():
+                return res[key].strip()
+        parts = []
+        for k, v in res.items():
+            if isinstance(v, (str, dict, list)) and v:
+                parts.append(f"{k}: {v}")
+        if parts:
+            return "\n".join(parts)
+        return json.dumps(res)
+    return str(res)
 
 
 
@@ -149,8 +176,9 @@ def resolve_visual_context(
     max_images: int = IMAGE_HEAVY_THRESHOLD,
 ) -> list[str]:
     """
-    Stage 6a: Queries vision model ONLY for retrieved chunks flagged with has_visual_content.
-    Enforces hard cap (max_images=3), page-level deduplication, disk caching, and query-conditioned prompts.
+    Stage 6a: Primary Image Processing using Local Visual Predictor API (POST /predict with image + expectation text).
+    Extracts image data/analysis and feeds it to LLM alongside text retrieval chunks.
+    Falls back gracefully to cloud VLM models if local API endpoint is unreachable.
     """
     os.makedirs(VLM_CACHE_PATH, exist_ok=True)
     
@@ -191,11 +219,6 @@ def resolve_visual_context(
     if not selected_pages:
         return []
 
-    providers = _get_available_providers(is_vision=True)
-    if not providers:
-        print("  [WARN] [Stage 6a] Skipping vision model call: No API key found in environment. Falling back gracefully to text-only.")
-        return []
-
     image_transcriptions = []
 
     for page in selected_pages:
@@ -217,99 +240,135 @@ def resolve_visual_context(
             except Exception as e:
                 print(f"  [WARN] Failed to read VLM cache file {cache_file_path}: {e}")
 
-        # Transcribe with VLM on demand across available providers/models
-        try:
-            with Image.open(img_path) as img:
-                buffered = io.BytesIO()
-                img.save(buffered, format="PNG")
-                img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        # Construct expectation prompt for Local Visual Predictor API
+        expectation_prompt = (
+            f"Analyze attached page image from manual '{manual_name}' (page {page_num}).\n"
+            f"User query context: '{user_query}'\n\n"
+            f"Expected outcome: Extract and transcribe all relevant diagram details, tables, spec values, "
+            f"warning notes, or schematics needed to answer the procedure query: '{user_query}'."
+        )
 
-            prompt = (
-                f"You are an industrial manual page parser. Analyze the attached page image from '{manual_name}'.\n"
-                f"User query context: '{user_query}'\n\n"
-                f"Perform layout-aware visual transcription:\n"
-                f"1. Transcribe tables into clean Markdown tables, focusing on values/specs relevant to the query.\n"
-                f"2. Transcribe mathematical formulas into LaTeX notation.\n"
-                f"3. Describe key engineering diagrams, warnings, or schematics in concise 1-2 sentence bracketed notes.\n"
-                f"Output ONLY clean Markdown transcriptions."
-            )
+        transcribed = False
 
-            transcribed = False
-            for p in providers:
-                p_name = p["name"]
-                client = p["client"]
-                model = p["model"]
-                print(f"  [Stage 6a] Calling VLM ({p_name}/{model}) for {manual_name} page {page_num}…")
+        # ── Primary Choice: Local Visual Predictor API ───────────────────────
+        print(f"  [Stage 6a] Calling Local Visual Predictor API ({PREDICT_API_URL}) for {manual_name} page {page_num}…")
+        local_res = predict_image_object(img_path, text=expectation_prompt, endpoint=PREDICT_API_URL)
+        extracted_text = extract_predict_text(local_res)
 
+        if extracted_text:
+            formatted_transcription = f"--- Visual Context (Local Predictor API) from {manual_name} (Page {page_num}) ---\n{extracted_text}"
+            image_transcriptions.append(formatted_transcription)
+
+            # Save to disk cache
+            with open(cache_file_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "manual": manual_name,
+                    "page_num": page_num,
+                    "transcription": formatted_transcription,
+                    "source": "local_predictor_api"
+                }, f, indent=2)
+
+            transcribed = True
+            print(f"  [OK] [Stage 6a] Local Visual Predictor API succeeded for {manual_name} page {page_num}")
+        else:
+            print(f"  [WARN] [Stage 6a] Local Visual Predictor API unreachable or empty response. Falling back to Cloud VLM providers...")
+
+        # ── Fallback Choice: Cloud VLM Providers ──────────────────────────────
+        if not transcribed:
+            providers = _get_available_providers(is_vision=True)
+            if not providers:
+                print("  [WARN] [Stage 6a] No Cloud VLM API keys configured. Falling back gracefully to text-only.")
+            else:
                 try:
-                    p_type = p.get("provider_type", "openai")
+                    with Image.open(img_path) as img:
+                        buffered = io.BytesIO()
+                        img.save(buffered, format="PNG")
+                        img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-                    if p_type == "anthropic":
-                        # Anthropic image format uses {type:image, source:{type:base64,...}}
-                        def _call_vlm():
-                            return client.messages.create(
-                                model=model,
-                                max_tokens=1500,
-                                messages=[{
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "text", "text": prompt},
-                                        {
-                                            "type": "image",
-                                            "source": {
-                                                "type": "base64",
-                                                "media_type": "image/png",
-                                                "data": img_b64,
-                                            }
-                                        }
-                                    ]
-                                }]
-                            )
-                    else:
-                        # OpenAI-compat: image_url with data URI
-                        def _call_vlm():
-                            return client.chat.completions.create(
-                                model=model,
-                                messages=[{
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "text", "text": prompt},
-                                        {
-                                            "type": "image_url",
-                                            "image_url": {"url": f"data:image/png;base64,{img_b64}"}
-                                        }
-                                    ]
-                                }],
-                                temperature=0.1,
-                                max_tokens=1500,
-                            )
+                    prompt = (
+                        f"You are an industrial manual page parser. Analyze the attached page image from '{manual_name}'.\n"
+                        f"User query context: '{user_query}'\n\n"
+                        f"Perform layout-aware visual transcription:\n"
+                        f"1. Transcribe tables into clean Markdown tables, focusing on values/specs relevant to the query.\n"
+                        f"2. Transcribe mathematical formulas into LaTeX notation.\n"
+                        f"3. Describe key engineering diagrams, warnings, or schematics in concise 1-2 sentence bracketed notes.\n"
+                        f"Output ONLY clean Markdown transcriptions."
+                    )
 
-                    res = retry_with_backoff(_call_vlm, max_retries=1, initial_delay=2.0)
-                    transcription = _extract_content(res, p_type).strip()
+                    for p in providers:
+                        p_name = p["name"]
+                        client = p["client"]
+                        model = p["model"]
+                        print(f"  [Stage 6a] Calling Cloud VLM ({p_name}/{model}) for {manual_name} page {page_num}…")
 
-                    if transcription:
-                        formatted_transcription = f"--- Visual Context from {manual_name} (Page {page_num}) ---\n{transcription}"
-                        image_transcriptions.append(formatted_transcription)
+                        try:
+                            p_type = p.get("provider_type", "openai")
 
-                        # Save to disk cache
-                        with open(cache_file_path, "w", encoding="utf-8") as f:
-                            json.dump({
-                                "manual": manual_name,
-                                "page_num": page_num,
-                                "transcription": formatted_transcription,
-                            }, f, indent=2)
+                            if p_type == "anthropic":
+                                def _call_vlm():
+                                    return client.messages.create(
+                                        model=model,
+                                        max_tokens=1500,
+                                        messages=[{
+                                            "role": "user",
+                                            "content": [
+                                                {"type": "text", "text": prompt},
+                                                {
+                                                    "type": "image",
+                                                    "source": {
+                                                        "type": "base64",
+                                                        "media_type": "image/png",
+                                                        "data": img_b64,
+                                                    }
+                                                }
+                                            ]
+                                        }]
+                                    )
+                            else:
+                                def _call_vlm():
+                                    return client.chat.completions.create(
+                                        model=model,
+                                        messages=[{
+                                            "role": "user",
+                                            "content": [
+                                                {"type": "text", "text": prompt},
+                                                {
+                                                    "type": "image_url",
+                                                    "image_url": {"url": f"data:image/png;base64,{img_b64}"}
+                                                }
+                                            ]
+                                        }],
+                                        temperature=0.1,
+                                        max_tokens=1500,
+                                    )
 
-                        transcribed = True
-                        break
+                            res = retry_with_backoff(_call_vlm, max_retries=1, initial_delay=2.0)
+                            transcription = _extract_content(res, p_type).strip()
 
-                except Exception as p_err:
-                    print(f"  [WARN] Provider {p_name} failed: {p_err}. Trying next option…")
+                            if transcription:
+                                formatted_transcription = f"--- Visual Context ({p_name}) from {manual_name} (Page {page_num}) ---\n{transcription}"
+                                image_transcriptions.append(formatted_transcription)
 
-            if not transcribed:
-                print(f"  [WARN] [Stage 6a] All VLM options failed for page {page_num}. Falling back gracefully to text-only.")
+                                # Save to disk cache
+                                with open(cache_file_path, "w", encoding="utf-8") as f:
+                                    json.dump({
+                                        "manual": manual_name,
+                                        "page_num": page_num,
+                                        "transcription": formatted_transcription,
+                                        "source": p_name
+                                    }, f, indent=2)
 
-        except Exception as exc:
-            print(f"  [WARN] [Stage 6a] Image reading failed for page {page_num} ({exc}). Falling back gracefully.")
+                                transcribed = True
+                                break
+
+                        except Exception as p_err:
+                            print(f"  [WARN] Provider {p_name} failed: {p_err}. Trying next option…")
+
+                except Exception as exc:
+                    print(f"  [WARN] [Stage 6a] Image reading failed for page {page_num} ({exc}). Falling back gracefully.")
+
+        if not transcribed:
+            print(f"  [WARN] [Stage 6a] All VLM options failed for page {page_num}. Falling back gracefully to text-only.")
 
     return image_transcriptions
 
@@ -345,8 +404,8 @@ def extract_sop(
 
     system_prompt = (
         "You are ParseOS, an expert industrial AI intelligence engine.\n"
-        "Your job is to read industrial machine manual excerpts (+ optional visual table/diagram transcriptions) "
-        "and convert them into a structured, step-by-step Standard Operating Procedure (SOP).\n\n"
+        "Your job is to synthesize both the retrieved manual text context AND the extracted visual prediction data "
+        "(from image analysis/VLM of tables, schematics, and diagrams) into a unified, augmented, step-by-step Standard Operating Procedure (SOP).\n\n"
         "Output MUST be valid JSON adhering strictly to this JSON schema:\n"
         "{\n"
         '  "procedure_title": "Concise Procedure Title",\n'
