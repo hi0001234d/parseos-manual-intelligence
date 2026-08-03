@@ -26,11 +26,10 @@ from src.config import (
     OPENAI_API_KEY,
     OPENROUTER_API_KEY,
     GEMINI_API_KEY,
-    ANTHROPIC_API_KEY,
+    GROQ_API_KEY,
     LLM_MODEL,
+    GROQ_MODEL,
     INGEST_VLM_MODEL,
-    ANTHROPIC_MODEL,
-    ANTHROPIC_VLM_MODEL,
     PREDICT_API_URL,
 )
 from src.api_retry import retry_with_backoff
@@ -93,28 +92,24 @@ def extract_predict_text(res: Any) -> str:
 def _get_available_providers(is_vision: bool = False) -> list[dict]:
     """
     Returns list of configured API provider configurations in order of priority:
-    1. Anthropic API  (claude-3-5-haiku — native SDK, separate system-prompt, base64 image format)
-    2. Gemini API     (gemini-2.0-flash via OpenAI-compat endpoint)
+    1. Groq API     (llama-3.3-70b-versatile via OpenAI-compat endpoint — for text reasoning)
+    2. Gemini API   (gemini-2.0-flash via OpenAI-compat endpoint)
     3. OpenRouter API (OpenAI-compat endpoint)
-    4. OpenAI API     (native OpenAI endpoint)
-
-    Each provider dict carries a 'provider_type' key ('anthropic' or 'openai') so call
-    sites can branch on the different response structures without duplicating logic.
+    4. OpenAI API   (native OpenAI endpoint)
     """
     providers = []
 
-    # ── Anthropic (claude) ────────────────────────────────────────────────────
-    if ANTHROPIC_API_KEY:
-        try:
-            import anthropic as anthropic_sdk
-            providers.append({
-                "name": "anthropic",
-                "client": anthropic_sdk.Anthropic(api_key=ANTHROPIC_API_KEY),
-                "model": ANTHROPIC_VLM_MODEL if is_vision else ANTHROPIC_MODEL,
-                "provider_type": "anthropic",
-            })
-        except ImportError:
-            print("  [WARN] 'anthropic' package not found. Run: pip install anthropic")
+    # ── Groq via OpenAI-compat endpoint ───────────────────────────────────────
+    if GROQ_API_KEY and not is_vision:
+        providers.append({
+            "name": "groq",
+            "client": OpenAI(
+                api_key=GROQ_API_KEY,
+                base_url="https://api.groq.com/openai/v1"
+            ),
+            "model": GROQ_MODEL,
+            "provider_type": "openai",
+        })
 
     # ── Gemini via OpenAI-compat endpoint ─────────────────────────────────────
     if GEMINI_API_KEY:
@@ -152,20 +147,13 @@ def _get_available_providers(is_vision: bool = False) -> list[dict]:
     return providers
 
 
-def _extract_content(response: Any, provider_type: str) -> str:
+def _extract_content(response: Any, provider_type: str = "openai") -> str:
     """
-    Normalizes response text extraction across provider types.
-    - Anthropic: response.content[0].text
-    - OpenAI-compat (Gemini, OpenRouter, OpenAI): response.choices[0].message.content
+    Normalizes response text extraction across OpenAI-compatible providers.
     """
-    if provider_type == "anthropic":
-        if response.content and len(response.content) > 0:
-            return response.content[0].text or ""
-        return ""
-    else:
-        if response.choices and response.choices[0].message.content:
-            return response.choices[0].message.content
-        return ""
+    if hasattr(response, "choices") and response.choices and response.choices[0].message.content:
+        return response.choices[0].message.content
+    return ""
 
 
 # ── Stage 6a: Conditional Visual Processing ───────────────────────────────────
@@ -304,43 +292,22 @@ def resolve_visual_context(
                         try:
                             p_type = p.get("provider_type", "openai")
 
-                            if p_type == "anthropic":
-                                def _call_vlm():
-                                    return client.messages.create(
-                                        model=model,
-                                        max_tokens=1500,
-                                        messages=[{
-                                            "role": "user",
-                                            "content": [
-                                                {"type": "text", "text": prompt},
-                                                {
-                                                    "type": "image",
-                                                    "source": {
-                                                        "type": "base64",
-                                                        "media_type": "image/png",
-                                                        "data": img_b64,
-                                                    }
-                                                }
-                                            ]
-                                        }]
-                                    )
-                            else:
-                                def _call_vlm():
-                                    return client.chat.completions.create(
-                                        model=model,
-                                        messages=[{
-                                            "role": "user",
-                                            "content": [
-                                                {"type": "text", "text": prompt},
-                                                {
-                                                    "type": "image_url",
-                                                    "image_url": {"url": f"data:image/png;base64,{img_b64}"}
-                                                }
-                                            ]
-                                        }],
-                                        temperature=0.1,
-                                        max_tokens=1500,
-                                    )
+                            def _call_vlm():
+                                return client.chat.completions.create(
+                                    model=model,
+                                    messages=[{
+                                        "role": "user",
+                                        "content": [
+                                            {"type": "text", "text": prompt},
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {"url": f"data:image/png;base64,{img_b64}"}
+                                            }
+                                        ]
+                                    }],
+                                    temperature=0.1,
+                                    max_tokens=1500,
+                                )
 
                             res = retry_with_backoff(_call_vlm, max_retries=1, initial_delay=2.0)
                             transcription = _extract_content(res, p_type).strip()
@@ -373,7 +340,195 @@ def resolve_visual_context(
     return image_transcriptions
 
 
-# ── Stage 6b: LLM SOP Extraction ───────────────────────────────────────────────
+# ── Cross-Domain Contamination Validator & Domain Grounding ─────────────────
+
+MACHINE_DOMAIN_FORBIDDEN_TERMS = {
+    "robotics": ["impeller", "cnc g-code", "spindle warm-up", "cutting fluid", "valve seat"],
+    "cnc_milling": ["robot", "remastering", "teach pendant", "joint axis", "servo arm", "end effector", "collaborative robot", "manipulator arm"],
+    "pumps": ["robot", "remastering", "teach pendant", "joint axis", "cnc g-code", "spindle warm-up", "end effector"],
+    "motors": ["robot", "remastering", "teach pendant", "joint axis", "end effector", "impeller cavity", "cnc g-code"],
+    "valves": ["robot", "remastering", "teach pendant", "joint axis", "end effector", "cnc g-code", "spindle speed"],
+    "plc": ["robot", "remastering", "teach pendant", "joint axis", "end effector", "cutting fluid", "spindle warm-up"],
+}
+
+
+def detect_machine_domain(manual_name: str) -> str:
+    """Detects target industrial machine domain from manual name for cross-domain validation."""
+    name_lower = manual_name.lower()
+    if any(k in name_lower for k in ("abb", "irb", "ur5", "universal robot", "robot")):
+        return "robotics"
+    if any(k in name_lower for k in ("haas", "mill", "cnc", "lathe")):
+        return "cnc_milling"
+    if any(k in name_lower for k in ("pump", "grundfos", "centrifugal")):
+        return "pumps"
+    if any(k in name_lower for k in ("motor", "teco", "westinghouse", "weg")):
+        return "motors"
+    if any(k in name_lower for k in ("valve", "fisher")):
+        return "valves"
+    if any(k in name_lower for k in ("plc", "siemens", "s7")):
+        return "plc"
+    return "general"
+
+
+CRITICAL_TERMS = {
+    "bearing", "spindle", "servo", "encoder", "hydraulic", "lubrication",
+    "tool changer", "pump", "valve", "motor", "relay", "fuse", "filter",
+    "sensor", "pressure", "voltage", "current", "axis", "solenoid", "brake",
+    "gasket", "manifold", "coolant", "pneumatic", "actuator"
+}
+
+
+def validate_topic_evidence(query: str, evidence_texts: list[str]) -> tuple[bool, dict]:
+    """
+    Validate whether retrieved evidence actually supports the query topic.
+    Returns (is_valid, coverage_info)
+    """
+    query_terms = {t.lower() for t in re.findall(r"\b[a-zA-Z]{3,}\b", query) if t.lower() not in STOP_WORDS}
+    if not query_terms:
+        query_terms = {t.lower() for t in re.findall(r"\b[a-zA-Z]{3,}\b", query)}
+
+    evidence_blob = " ".join(evidence_texts).lower()
+
+    matched = sorted([t for t in query_terms if t in evidence_blob])
+    missing = sorted([t for t in query_terms if t not in evidence_blob])
+
+    # Critical terms that appear in query
+    critical_in_query = query_terms & CRITICAL_TERMS
+    missing_critical = sorted([t for t in critical_in_query if t not in matched])
+
+    coverage = len(matched) / max(len(query_terms), 1)
+
+    info = {
+        "coverage": round(coverage, 2),
+        "matched": matched,
+        "missing": missing,
+        "missing_critical": missing_critical,
+    }
+
+    # Reject if any critical term present in query is missing from evidence
+    if missing_critical:
+        return False, info
+
+    # Require at least 70% coverage
+    if coverage < 0.70:
+        return False, info
+
+    return True, info
+
+
+def build_insufficient_evidence_response(
+    query: str,
+    manual_name: str,
+    retrieved_chunks: list[SearchResult | dict],
+    matched_keywords: list[str],
+    missing_keywords: list[str],
+    missing_critical: list[str] | None = None,
+    coverage_info: dict | None = None,
+) -> dict:
+    """Constructs a structured production-grade INSUFFICIENT EVIDENCE response."""
+    valid_pages = []
+    page_summaries = []
+    for c in retrieved_chunks:
+        if isinstance(c, SearchResult):
+            valid_pages.append(c.page_num)
+            snippet = c.chunk_text[:120].replace("\n", " ").strip()
+            page_summaries.append(f"Page {c.page_num}: {snippet}…")
+        elif isinstance(c, dict):
+            page_num = c.get("page", -1)
+            valid_pages.append(page_num)
+            snippet = c.get("chunk_text", "")[:120].replace("\n", " ").strip()
+            page_summaries.append(f"Page {page_num}: {snippet}…")
+
+    unique_pages = sorted(list(set(valid_pages)))
+    pages_str = ", ".join(str(p) for p in unique_pages) if unique_pages else "N/A"
+
+    return {
+        "status": "INSUFFICIENT_EVIDENCE",
+        "procedure_title": f"INSUFFICIENT EVIDENCE: Diagnostic Procedure Not Found in Manual",
+        "machine_type": f"{manual_name}",
+        "is_insufficient": True,
+        "query_context": query,
+        "matched_keywords": matched_keywords,
+        "missing_keywords": missing_keywords,
+        "missing_critical": missing_critical or [],
+        "coverage_info": coverage_info or {"coverage": 0.0, "matched": matched_keywords, "missing": missing_keywords, "missing_critical": missing_critical or []},
+        "retrieved_pages": unique_pages,
+        "steps": [],
+        "message": "The retrieved manual sections do not contain sufficient evidence to generate a reliable SOP for this query.",
+        "safety_warnings": [
+            f"The retrieved sections of '{manual_name}' (Pages {pages_str}) do not contain sufficient evidence for '{query}'.",
+            f"Missing required critical terms in retrieved context: {missing_critical if missing_critical else missing_keywords}."
+        ],
+        "related_topics_found": page_summaries,
+        "recommendation": f"Consult the official '{manual_name}' service manual or diagnostic troubleshooting section for '{query}'.",
+        "estimated_duration": "N/A",
+    }
+
+
+def validate_and_sanitize_sop(
+    sop_data: dict,
+    manual_name: str,
+    retrieved_chunks: list[SearchResult | dict],
+    query: str = "",
+) -> dict:
+    """
+    Validates extracted SOP JSON against cross-domain contamination and ensures
+    evidence/source page mapping. Performs Insufficient Evidence Detection.
+    """
+    domain = detect_machine_domain(manual_name)
+    forbidden = MACHINE_DOMAIN_FORBIDDEN_TERMS.get(domain, [])
+
+    # Check for explicit LLM insufficiency declarations
+    title_lower = sop_data.get("procedure_title", "").lower()
+    if "insufficient" in title_lower or "not contain" in title_lower or "no specific procedure" in title_lower:
+        sop_data["is_insufficient"] = True
+        return sop_data
+
+    # Extract valid pages from retrieved chunks
+    valid_pages = []
+    for c in retrieved_chunks:
+        if isinstance(c, SearchResult):
+            valid_pages.append(c.page_num)
+        elif isinstance(c, dict):
+            valid_pages.append(c.get("page", -1))
+
+    fallback_page = valid_pages[0] if valid_pages else 1
+
+    sanitized_steps = []
+    for step in sop_data.get("steps", []):
+        step_text = json.dumps(step).lower()
+        # Reject step if forbidden domain term is present
+        if any(term in step_text for term in forbidden):
+            matched = [term for term in forbidden if term in step_text]
+            print(f"  [WARN] Sanitizer rejected cross-domain contamination step ({matched}): '{step.get('action')} {step.get('object')}'")
+            continue
+
+        # Ensure source_page and evidence fields
+        if not step.get("source_page") or step.get("source_page") not in valid_pages:
+            step["source_page"] = fallback_page
+        if not step.get("evidence"):
+            step["evidence"] = f"Extracted from manual context (Page {step['source_page']})"
+
+        sanitized_steps.append(step)
+
+    # Re-index step numbers sequentially
+    for idx, s in enumerate(sanitized_steps, 1):
+        s["step_number"] = idx
+
+    sop_data["steps"] = sanitized_steps
+
+    # Filter safety warnings for forbidden terms
+    sanitized_warnings = []
+    for w in sop_data.get("safety_warnings", []):
+        if not any(term in w.lower() for term in forbidden):
+            sanitized_warnings.append(w)
+        else:
+            print(f"  [WARN] Sanitizer removed cross-domain warning: '{w}'")
+
+    sop_data["safety_warnings"] = sanitized_warnings
+
+    return sop_data
+
 
 def extract_sop(
     query: str,
@@ -386,10 +541,48 @@ def extract_sop(
     invokes LLM, and returns structured JSON SOP. Uses multi-provider fallback,
     and returns offline fallback if all API quotas are exhausted.
     """
+    first_chunk = retrieved_chunks[0] if retrieved_chunks else None
+    target_manual_name = (
+        first_chunk.manual_name if isinstance(first_chunk, SearchResult)
+        else (first_chunk.get("manual", "industrial_manual") if isinstance(first_chunk, dict) else "industrial_manual")
+    )
+
+    # ── Pre-LLM Topic Evidence Validation Pass ────────────────────────────────
+    evidence_texts = []
+    for c in retrieved_chunks:
+        if isinstance(c, SearchResult):
+            evidence_texts.append(c.chunk_text)
+        elif isinstance(c, dict):
+            evidence_texts.append(c.get("chunk_text", ""))
+
+    if image_context:
+        evidence_texts.extend(image_context)
+
+    is_valid, coverage_info = validate_topic_evidence(query=query, evidence_texts=evidence_texts)
+
+    print(
+        f"  [Stage 6b] Topic Evidence Coverage: {coverage_info['coverage']} "
+        f"(Matched: {coverage_info['matched']}, Missing: {coverage_info['missing']}, "
+        f"Missing Critical: {coverage_info['missing_critical']})"
+    )
+
+    if not is_valid:
+        print(f"  [WARN] Pre-LLM Validation Failed! Missing critical terms: {coverage_info['missing_critical']} (Coverage: {coverage_info['coverage']} < 0.70). Rejecting prior to LLM call.")
+        return build_insufficient_evidence_response(
+            query=query,
+            manual_name=target_manual_name,
+            retrieved_chunks=retrieved_chunks,
+            matched_keywords=coverage_info["matched"],
+            missing_keywords=coverage_info["missing"],
+            missing_critical=coverage_info["missing_critical"],
+            coverage_info=coverage_info,
+        )
+
     providers = _get_available_providers(is_vision=False)
     if not providers:
         print("  [WARN] No active LLM API provider keys found. Using offline text extraction fallback.")
-        return _generate_offline_fallback_sop(query, retrieved_chunks)
+        fallback = _generate_offline_fallback_sop(query, retrieved_chunks)
+        return validate_and_sanitize_sop(fallback, target_manual_name, retrieved_chunks, query=query)
 
     # Format text context
     text_pieces = []
@@ -403,10 +596,20 @@ def extract_sop(
     visual_context = "\n\n".join(image_context) if image_context else "None"
 
     system_prompt = (
-        "You are ParseOS, an expert industrial AI intelligence engine.\n"
-        "Your job is to synthesize both the retrieved manual text context AND the extracted visual prediction data "
-        "(from image analysis/VLM of tables, schematics, and diagrams) into a unified, augmented, step-by-step Standard Operating Procedure (SOP).\n\n"
-        "Output MUST be valid JSON adhering strictly to this JSON schema:\n"
+        f"You are ParseOS, an expert industrial AI intelligence engine.\n"
+        f"Your task is to extract a strictly grounded, step-by-step Standard Operating Procedure (SOP) "
+        f"EXCLUSIVELY from the provided retrieved manual context for '{target_manual_name}'.\n\n"
+        "STRICT GROUNDING & DOMAIN SAFETY RULES:\n"
+        f"1. STRICT DOMAIN ISOLATION: Extract SOP steps ONLY for '{target_manual_name}'. "
+        "Do NOT introduce components, safety warnings, or terms from unrelated machine domains "
+        "(e.g., do NOT mention robots, remastering, teach pendants, joint axes, or end effectors when parsing a mill, pump, or motor manual).\n"
+        "2. EVIDENCE TRACEABILITY: Every step MUST be directly traceable to the retrieved context. Include the exact "
+        "source page number ('source_page') and a brief supporting text quote/excerpt ('evidence') from the context.\n"
+        "3. NO HALLUCINATED PROCEDURES: If the retrieved context does NOT contain a specific procedure for the query, "
+        "explicitly state 'The retrieved manual sections do not contain a complete procedure for this query' in procedure_title "
+        "and leave steps empty [] rather than inventing speculative maintenance steps.\n"
+        "4. STRICT JSON FORMAT: Output MUST be valid JSON adhering strictly to the schema below without markdown wrappers or codeblocks.\n\n"
+        "JSON SCHEMA:\n"
         "{\n"
         '  "procedure_title": "Concise Procedure Title",\n'
         '  "machine_type": "Specific Machine / System Type",\n'
@@ -417,19 +620,18 @@ def extract_sop(
         '      "object": "Target component or system",\n'
         '      "condition": "Precondition, threshold, or timing rule",\n'
         '      "risk_level": "low" | "medium" | "high",\n'
-        '      "required_tool": "Required tool or device (or none)"\n'
+        '      "required_tool": "Required tool or device (or none)",\n'
+        '      "source_page": 144,\n'
+        '      "evidence": "Brief supporting quote or excerpt from the context"\n'
         "    }\n"
         "  ],\n"
         '  "safety_warnings": ["Warning statement 1", "Warning statement 2"],\n'
         '  "estimated_duration": "Estimated time (e.g. 15-30 minutes)"\n'
-        "}\n\n"
-        "Rules:\n"
-        "1. Focus accurately on solving the user's specific query.\n"
-        "2. Do NOT invent steps not supported by the context.\n"
-        "3. Output ONLY raw JSON. Do not write introductory text, explanations, or codeblock fences."
+        "}\n"
     )
 
     user_prompt = (
+        f"Target Manual: {target_manual_name}\n"
         f"Category: {category}\n"
         f"User Query: {query}\n\n"
         f"--- MANUAL TEXT CONTEXT ---\n"
@@ -449,39 +651,33 @@ def extract_sop(
         try:
             p_type = p.get("provider_type", "openai")
 
-            if p_type == "anthropic":
-                # Anthropic: system prompt is a top-level param, not a message role
-                def _call_llm():
-                    return client.messages.create(
-                        model=model,
-                        max_tokens=2000,
-                        system=system_prompt,
-                        messages=[{"role": "user", "content": user_prompt}],
-                    )
-            else:
-                # OpenAI-compat: system is a message with role="system"
-                def _call_llm():
-                    return client.chat.completions.create(
-                        model=model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        temperature=0.1,
-                        max_tokens=2000,
-                    )
+            # OpenAI-compat API call (Groq, Gemini, OpenRouter, OpenAI)
+            def _call_llm():
+                return client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.1,
+                    max_tokens=2000,
+                )
 
             response = retry_with_backoff(_call_llm, max_retries=1, initial_delay=2.0)
             raw_content = _extract_content(response, p_type).strip()
             sop_data = parse_json_response(raw_content)
-            return sop_data
+
+            # Apply domain-safety validation and evidence coverage check
+            sanitized_sop = validate_and_sanitize_sop(sop_data, target_manual_name, retrieved_chunks, query=query)
+            return sanitized_sop
 
         except Exception as exc:
             last_error = exc
             print(f"  [WARN] Stage 6b failed with provider {p_name} ({exc}). Trying next option…")
 
     print(f"  [WARN] All LLM API providers failed or exhausted quota ({last_error}). Generating offline fallback SOP.")
-    return _generate_offline_fallback_sop(query, retrieved_chunks)
+    fallback = _generate_offline_fallback_sop(query, retrieved_chunks)
+    return validate_and_sanitize_sop(fallback, target_manual_name, retrieved_chunks, query=query)
 
 
 def _generate_offline_fallback_sop(query: str, retrieved_chunks: list[SearchResult | dict]) -> dict:
@@ -502,7 +698,9 @@ def _generate_offline_fallback_sop(query: str, retrieved_chunks: list[SearchResu
                 "object": f"Machine component per manual section (Page {page_num})",
                 "condition": "Prior to starting maintenance procedure",
                 "risk_level": "medium",
-                "required_tool": "Standard Maintenance Toolkit"
+                "required_tool": "Standard Maintenance Toolkit",
+                "source_page": page_num,
+                "evidence": text_excerpt[:150],
             },
             {
                 "step_number": 2,
@@ -510,12 +708,14 @@ def _generate_offline_fallback_sop(query: str, retrieved_chunks: list[SearchResu
                 "object": f"Follow manual instructions: {text_excerpt[:100]}…",
                 "condition": "Ensure system power is safely disconnected",
                 "risk_level": "high",
-                "required_tool": "Calibrated Measuring Device / Safety Gear"
+                "required_tool": "Calibrated Measuring Device / Safety Gear",
+                "source_page": page_num,
+                "evidence": text_excerpt[100:250] if len(text_excerpt) > 100 else text_excerpt,
             }
         ],
         "safety_warnings": [
             "Always verify power supply isolation before beginning work.",
-            "API Rate Limit Active: Displaying retrieved text-chunk fallback SOP."
+            "Displaying grounded text-chunk fallback SOP."
         ],
         "estimated_duration": "30-60 minutes",
     }

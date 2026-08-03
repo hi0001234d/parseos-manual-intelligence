@@ -1,135 +1,130 @@
---------------------------------------------------------------------------
-<!--
-  TODO before publishing:
-    - Replace <your-username> in the clone URL with the real GitHub org/user.
-    - Choose a license and add a LICENSE file (MIT recommended for an open prototype).
--->
-
-# ParseOS Manual Intelligence
+# ParseOS Manual Intelligence (v2.0)
 
 ### An AI engine that turns industrial manuals into structured, queryable procedures
 
-> Manual Intelligence reads industrial machine manuals (PDFs) and turns them into structured, machine-readable Standard Operating Procedures (SOPs). It is the reasoning layer — the **brain** — behind this system.
+> Manual Intelligence reads industrial machine manuals (PDFs) and turns them into structured, machine-readable Standard Operating Procedures (SOPs). It is the reasoning layer — the **brain** — behind the ParseOS system.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Status](https://img.shields.io/badge/status-prototype-orange)
-![Pipeline](https://img.shields.io/badge/pipeline-RAG-purple)
-![LLM](https://img.shields.io/badge/LLM-OpenAI%20%7C%20Gemini%20%7C%20OpenRouter-9cf)
-![License](https://img.shields.io/badge/license-TBD-lightgrey)
+![Architecture](https://img.shields.io/badge/architecture-Deferred--Vision%20RAG-green)
+![Framework](https://img.shields.io/badge/framework-LlamaIndex-orange)
+![Vector DB](https://img.shields.io/badge/vector--db-ChromaDB-red)
+![LLMs](https://img.shields.io/badge/LLMs-Groq%20%7C%20Gemini%20%7C%20OpenRouter%20%7C%20OpenAI-purple)
 
 ---
 
-## The problem
+## The Problem
 
-- Manufacturing, energy, and robotics run on machine manuals — hundreds of pages of dense PDF written for humans.
-- When a motor overheats or a pump seal fails, an engineer digs through a binder to find the right procedure.
-- It is slow, error-prone, and does not scale.
+- Manufacturing, energy, and robotics run on complex machine manuals — hundreds of pages of dense PDF documentation written for human reading.
+- When a motor overheats, a pump seal fails, or a PLC throws an error, technicians must manually search through binders or multi-page PDFs to locate the correct procedure.
+- This manual lookup process is slow, error-prone, and unsustainable for automated plant operations.
 
-Manual Intelligence replaces that manual search with instant, structured guidance. Ask *"motor overheating procedure?"* and get back a clean, step-by-step SOP in JSON — with actions, risk levels, required tools, and safety warnings.
-
----
-
-## What it actually is
-
-Manual Intelligence is **not** a chatbot and **not** a plain document search tool. It is a **structured knowledge extraction engine**.
-
-The real asset it produces is the **Knowledge Layer**: a growing library of machine-readable SOPs, each one a unit of industrial intelligence that downstream systems can query.
+ParseOS Manual Intelligence replaces manual search with instant, structured procedural guidance. Query *"motor overheating procedure"* and receive a validated, step-by-step SOP in machine-readable JSON — complete with risk levels, required tools, condition triggers, and safety warnings.
 
 ---
 
-## How it works
+## What It Actually Is
 
-Manual Intelligence is a retrieval-augmented generation (RAG) pipeline, built on LlamaIndex. A manual goes in; structured, queryable knowledge comes out.
+Manual Intelligence is **not** a simple chatbot and **not** a standard document Q&A search tool. It is a **structured knowledge extraction engine** powered by a **Deferred-Vision RAG Architecture (v2.0)**.
+
+The core asset produced is the **ParseOS Knowledge Layer**: a persistent library of machine-readable SOPs, each serving as an actionable unit of industrial intelligence that downstream automation systems, SCADA triggers, or technician interfaces can query.
+
+---
+
+## How It Works (v2.0 Architecture)
+
+ParseOS Manual Intelligence operates via a 7-stage retrieval-augmented generation (RAG) pipeline built on LlamaIndex.
 
 ```mermaid
 flowchart TD
-    A([PDF Manual]) --> B[Text Extraction + OCR / Vision fallback]
-    B --> C[Chunking]
-    C --> D[Embeddings]
-    D --> E[(Vector DB - ChromaDB)]
-    Q([User Query]) --> S[Semantic Search - LlamaIndex Retriever]
-    E --> S
-    S --> L[LLM Reasoning]
-    L --> J[/Structured SOP - JSON/]
-    J --> K[(Knowledge Layer)]
+    A([PDF Manual]) --> B[Stage 1: PyMuPDF Text Extraction + OCR Fallback]
+    B --> C[Visual Content Detection & Pre-Rendering]
+    C --> D[Stage 2-4: LlamaIndex SentenceSplitter + ChromaDB Vector Index]
+    
+    Q([User Query]) --> E[Stage 5: Semantic Retrieval - SearchEngine]
+    D --> E
+    
+    E --> F{Stage 6a: Visual Pages Flagged?}
+    F -- Yes (Cap <= 3) --> G[Local Visual Predictor API / Cloud VLM Fallback]
+    F -- No --> H[Stage 6b: Multi-Provider LLM SOP Reasoning]
+    G --> H
+    
+    H --> I[/Structured SOP JSON Output/]
+    I --> J[(Stage 7: ParseOS Knowledge Layer Store)]
 ```
 
-### The pipeline, stage by stage
+### The 7 Pipeline Stages
 
-| Stage | What it does | Tool |
-|:------|:-------------|:-----|
-| **1 · Extract** | Pull text from every page; pages with diagrams/tables/formulas go through a vision model, scanned pages fall back to OCR | PyMuPDF, Gemini Vision, Tesseract OCR |
-| **2 · Chunk** | Split text into overlapping, meaning-sized pieces | LlamaIndex `SentenceSplitter` |
-| **3 · Embed** | Convert each chunk into a 384-dim vector | sentence-transformers (`all-MiniLM-L6-v2`) |
-| **4 · Store** | Index vectors for semantic search | ChromaDB (local persistent) |
-| **5 · Search** | Retrieve the most relevant manual sections for a query | LlamaIndex `VectorIndexRetriever` |
-| **6 · Reason** | An LLM extracts structured SOP steps from those sections (with the page image attached when a formula, table, or diagram is involved) | OpenAI GPT-4o / Google Gemini / OpenRouter |
-| **7 · Knowledge Layer** | Enrich and persist each SOP with metadata | JSON store |
+| Stage | Name | Description | Key Modules / Tools |
+|:---|:---|:---|:---|
+| **1 · Extract & Detect** | **PDF Text & Visual Detection** | Extracts per-page text (with Tesseract OCR fallback for scanned pages). Applies heuristic scoring (`looks_like_table_diagram_or_formula`) to detect diagrams, tables, and schematics, pre-rendering page images to `data/page_images/`. Ingestion is **100% text-only** with zero upfront VLM calls. | PyMuPDF (`fitz`), Tesseract OCR |
+| **2 · Chunk** | **Metadata-Preserving Parsing** | Splits text into overlapping nodes while propagating parent page metadata (`page_num`, `has_visual_content`, `visual_confidence`, `image_path`, `ocr_used`). | LlamaIndex `SentenceSplitter` |
+| **3 · Embed** | **Vector Embedding** | Converts chunk nodes into 384-dimensional dense semantic vectors. | sentence-transformers (`all-MiniLM-L6-v2`) |
+| **4 · Store** | **Vector Database Indexing** | Persists vector embeddings and metadata in a local ChromaDB collection (`manual_knowledge`). | ChromaDB (`PersistentClient`) |
+| **5 · Search** | **Semantic Retrieval** | Performs cosine similarity search for relevant manual chunks, filtered optionally by specific manual target. Returns structured `SearchResult` objects. | LlamaIndex `VectorStoreIndex` |
+| **6a · Visual Context** | **Deferred Visual Processing** | Interrogates flagged visual pages at query time using a primary Local Visual Predictor API (`POST /predict`), falling back to Cloud VLMs (Gemini/OpenRouter/OpenAI). Enforces an `IMAGE_HEAVY_THRESHOLD` hard cap (max 3 images) and caches results in `data/vlm_cache/`. | Local Predictor API, Gemini Vision / GPT-4o-mini |
+| **6b · Reason & Validate** | **Pre-LLM Evidence Validation & Multi-Provider SOP Extraction** | Evaluates retrieved context via `validate_topic_evidence` for critical industrial terms and 70% topic coverage *prior* to calling the LLM. Immediately returns a structured `INSUFFICIENT EVIDENCE` response if critical query terms are missing, preventing token waste and hallucinations. If valid, extracts structured JSON SOP with evidence page mapping (`source_page`, `evidence`) via multi-provider fallback (Groq → Gemini → OpenRouter → OpenAI). | Groq (`llama-3.3-70b-versatile`), Gemini 2.0 Flash, OpenAI |
+| **7 · Knowledge Layer** | **Persistence & Schema Enrichment** | Enriches SOPs with unique IDs (`KL_<manual>_<timestamp>`), query metadata, keyword triggers, overall risk evaluation, and telemetry placeholder hooks for downstream integration. | JSON Knowledge Store |
 
 ---
 
-## Tech stack
+## Tech Stack
 
 | Component | Tool / Library | Purpose |
-|-----------|----------------|---------|
-| Language | Python 3.10+ | Core of every component |
-| PDF parsing | PyMuPDF (`fitz`) | Extract raw text from each page |
-| Vision fallback | Gemini Vision (or configured VLM) | Transcribe diagrams, formulas, and tables from page images |
-| OCR fallback | Tesseract (`pytesseract`) | Extract text from scanned pages that have no selectable text |
-| Text chunking | LlamaIndex `SentenceSplitter` | Split text into meaningful pieces |
-| Embeddings | sentence-transformers (`all-MiniLM-L6-v2`) | Text → semantic vectors |
-| Vector database | ChromaDB | Store and search vectors by similarity |
-| LLM reasoning | OpenAI GPT-4o, Google Gemini, or OpenRouter | Extract structured SOP steps |
-| API layer | FastAPI *(planned)* | Serve the engine as a web API |
-| Frontend | React.js *(planned)* | Upload manuals and run queries |
-| Data format | JSON | Output format for every SOP |
-
+|---|---|---|
+| **Core Language** | Python 3.10+ | Primary runtime |
+| **RAG Orchestration** | LlamaIndex | Document parsing, node metadata management, vector retrieval |
+| **PDF Parsing** | PyMuPDF (`fitz`) | Fast PDF text and vector drawing extraction |
+| **OCR Fallback** | Tesseract (`pytesseract`) | Scanned document OCR fallback |
+| **Embeddings** | sentence-transformers (`all-MiniLM-L6-v2`) | Text-to-vector embedding generation |
+| **Vector Store** | ChromaDB | Persistent local vector database |
+| **Visual Processing (Stage 6a)** | Local Visual Predictor API (`/predict`) / Cloud VLMs | Diagram, schematic, and table transcription |
+| **LLM Reasoning (Stage 6b)** | Groq, Google Gemini 2.0 Flash, OpenRouter, OpenAI GPT-4o | Structured SOP extraction |
+| **CLI & Formatting** | Colorama, argparse | Terminal UI renderer with colorized risk badges |
 
 ---
 
-## Project structure
+## Project Structure
 
 ```
 parseos-manual-intelligence/
 │
 ├── data/
-│   └── manuals/                 # Store all source PDF manuals here
-│       ├── weg_motor_manual.pdf
-│       └── ...
+│   ├── manuals/                 # Source PDF manuals directory
+│   ├── page_images/             # Pre-rendered page layout PNGs (cached during ingestion)
+│   └── vlm_cache/               # Cached visual transcription JSON outputs
 │
 ├── src/
-│   ├── config.py                 # Central config, loads .env
-│   ├── pdf_parser.py             # Stage 1: Text extraction (+ OCR / Vision fallback)
-│   ├── engine.py                 # Stages 2-5: Chunking, embeddings, ChromaDB, search (LlamaIndex)
-│   ├── sop_extractor.py          # Stage 6: LLM SOP extraction
-│   ├── knowledge_layer.py        # Stage 7: Knowledge storage
-│   ├── api_retry.py              # Retry/backoff helper for API calls
-│   └── chat_formatter.py         # Formats SOP output for the interactive chat mode
+│   ├── config.py                 # Central configuration and .env manager
+│   ├── pdf_parser.py             # Stage 1: Text extraction, OCR fallback, visual heuristics
+│   ├── engine.py                 # Stages 2–5: LlamaIndex chunking, embeddings, ChromaDB, search
+│   ├── sop_extractor.py          # Stage 6a & 6b: Local Predictor API / VLM & multi-provider LLM extraction
+│   ├── knowledge_layer.py        # Stage 7: Knowledge Layer JSON storage & schema enrichment
+│   ├── api_retry.py              # Exponential backoff retry wrapper for API calls
+│   └── chat_formatter.py         # Terminal output renderer with risk badges
 │
-├── chroma_storage/               # Auto-created by ChromaDB
-├── knowledge_layer/               # Auto-created: JSON SOP files
+├── chroma_storage/               # ChromaDB persistent vector database directory
+├── knowledge_layer/              # Extracted JSON SOP files directory
 │
-├── parseos_pipeline.py            # Master runner (CLI + interactive chat mode)
-├── ingest_all.py                  # Batch-ingest every PDF in data/manuals/
-├── verify.py                      # Milestone verification, stage by stage
-├── requirements.txt                # All dependencies
-├── .env                            # API keys (never commit)
-├── .gitignore
+├── parseos_pipeline.py            # Master CLI pipeline runner & interactive chat mode
+├── ingest_all.py                  # Batch ingestion script for all manuals
+├── verify.py                      # Stage 0–7 milestone verification test suite
+├── requirements.txt                # Project python dependencies
+├── .env                            # Environment variables & API keys configuration
 └── README.md
 ```
 
 ---
 
-## Getting started
+## Getting Started
 
-### 1. Clone the repository
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/<your-username>/parseos-manual-intelligence.git
 cd parseos-manual-intelligence
 ```
 
-### 2. Set up the environment
+### 2. Set Up Virtual Environment
 
 ```bash
 # Create and activate a virtual environment
@@ -141,143 +136,195 @@ parseos_env\Scripts\activate         # Windows
 pip install -r requirements.txt
 ```
 
-> To enable OCR fallback for scanned pages, also install `pytesseract` and `Pillow`, and have the Tesseract-OCR binary available on your system.
-
-### 3. Configure your provider and key
-
-Create a `.env` file in the project root:
-
-```bash
-# Provide at least one key — checked in this order: Gemini, then OpenRouter, then OpenAI
-GEMINI_API_KEY=your_key_here
-OPENROUTER_API_KEY=your_key_here
-OPENAI_API_KEY=your_key_here
-```
-
-> The embedding model (`all-MiniLM-L6-v2`, ~90MB) downloads automatically on first run.
-
-### 4. Add manuals
-
-Drop your industrial manual PDFs into `data/manuals/`. See [Supported manuals](#supported-manuals) for a starter set.
+> **Note on OCR Support:** For scanned PDF fallback support, ensure [Tesseract-OCR](https://github.com/tesseract-ocr/tesseract) is installed on your system.
 
 ---
 
 ## Configuration
 
-Set these in your `.env` (or as environment variables):
+Create a `.env` file in the project root to configure model providers and pipeline settings:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GEMINI_API_KEY` | — | Checked first for Stage 6 LLM extraction |
-| `OPENROUTER_API_KEY` | — | Checked second |
-| `OPENAI_API_KEY` | — | Checked third |
-| `LLM_MODEL` | `gpt-4o` | Model used for SOP extraction |
-| `INGEST_VLM_MODEL` | `gpt-4o-mini` | Vision model used to transcribe diagrams/tables/formulas at ingest time |
-| `USE_LAYOUT_PARSER` | `True` | Enables the vision-based page transcription during ingestion |
-| `CHUNK_SIZE` | `400` | Words per chunk |
-| `CHUNK_OVERLAP` | `50` | Overlapping words between chunks |
-| `TOP_K_RESULTS` | `3` | Number of search results retrieved |
-| `EMBED_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model |
-| `IMAGE_HEAVY_THRESHOLD` | `4` | Max page images sent to the vision model in a single query |
+```bash
+# ── API Provider Keys (Checked in priority order for Stage 6b) ─────────────
+GROQ_API_KEY=your_groq_key_here
+GEMINI_API_KEY=your_gemini_key_here
+OPENROUTER_API_KEY=your_openrouter_key_here
+OPENAI_API_KEY=your_openai_key_here
+
+# ── Model Options ──────────────────────────────────────────────────────────
+LLM_MODEL=gpt-4o
+GROQ_MODEL=llama-3.3-70b-versatile
+INGEST_VLM_MODEL=gpt-4o-mini
+EMBED_MODEL=all-MiniLM-L6-v2
+
+# ── Local Visual Predictor API Endpoint ──────────────────────────────────
+PREDICT_API_URL=http://192.168.0.128/predict
+
+# ── Pipeline Parameters ──────────────────────────────────────────────────
+CHUNK_SIZE=400
+CHUNK_OVERLAP=50
+TOP_K_RESULTS=3
+IMAGE_HEAVY_THRESHOLD=3
+```
+
+### Provider Fallback Order for Stage 6b:
+1. **Groq API** (`llama-3.3-70b-versatile`)
+2. **Gemini API** (`gemini-2.0-flash`)
+3. **OpenRouter API**
+4. **OpenAI API** (`gpt-4o`)
+5. **Offline Fallback** (Generates structured SOP from retrieved text chunks if all API quotas are exhausted)
 
 ---
 
 ## Usage
 
-Run the full pipeline on a single manual, from PDF to Knowledge Layer:
+### 1. Master Pipeline CLI (`parseos_pipeline.py`)
+
+Run the complete pipeline for a single manual PDF and query:
 
 ```bash
 python parseos_pipeline.py \
-  --manual data/manuals/weg_motor_manual.pdf \
-  --query "motor bearing overheating maintenance" \
+  --manual "data/manuals/TECO Westinghouse Motor.pdf" \
+  --query "motor overheating procedure" \
   --category manufacturing
 ```
 
-The runner prints progress in two blocks and then the final structured SOP:
-
-```
-──────────────────────────────────────────────
-  INGESTION PIPELINE (Stages 1–4)
-──────────────────────────────────────────────
-[1/1] Ingesting manual via LlamaIndex IngestionPipeline …
-
-──────────────────────────────────────────────
-  QUERY PIPELINE (Stages 5–7)
-──────────────────────────────────────────────
-[1/3] Semantic search (LlamaIndex): '...'
-[2/3] Extracting SOP with LlamaIndex LLM (...)
-[3/3] Saving to Knowledge Layer …
-```
-
-Other useful modes:
+#### Other Pipeline Modes:
 
 ```bash
-# Ingest only (stages 1-4, no LLM call)
-python parseos_pipeline.py --manual data/manuals/weg_motor_manual.pdf --ingest-only
+# Ingest manual only (Stages 1–4)
+python parseos_pipeline.py --manual "data/manuals/TECO Westinghouse Motor.pdf" --ingest-only
 
-# Query only, manual already ingested (stages 5-7)
-python parseos_pipeline.py --query "motor overheating fix" --category manufacturing --query-only
+# Query pre-ingested database (Stages 5–7)
+python parseos_pipeline.py --query "motor bearing overheating maintenance" --category manufacturing --query-only
 
-# Interactive chat mode
+# Force re-ingestion of manual
+python parseos_pipeline.py --manual "data/manuals/TECO Westinghouse Motor.pdf" --force
+
+# Launch interactive CLI Chat Mode
 python parseos_pipeline.py --chat
 ```
 
-**Batch ingestion.** To ingest every PDF in `data/manuals/` in one go:
+---
+
+### 2. Interactive CLI Chat Mode
+
+Launch an interactive prompt to query ingested manuals dynamically:
+
+```bash
+python parseos_pipeline.py --chat
+```
+
+Inside Chat Mode:
+- Type your question directly: `motor overheating procedure`
+- Filter queries to a specific manual: `use TECO Westinghouse Motor`
+- Reset manual filter: `use all`
+- Exit chat mode: `quit` or `exit`
+
+---
+
+### 3. Batch Ingestion (`ingest_all.py`)
+
+Ingest every PDF located in `data/manuals/` in a single run:
 
 ```bash
 python ingest_all.py
-python ingest_all.py --force   # re-ingest even if already stored
+
+# Force re-ingestion of all manuals
+python ingest_all.py --force
 ```
 
 ---
 
-## Example output
+### 4. Verification Test Suite (`verify.py`)
 
-A query like *"motor bearing overheating maintenance"* returns a structured SOP (illustrative example):
+Run the automated milestone verification suite to validate all 7 stages:
+
+```bash
+python verify.py
+```
+
+---
+
+## Example Output
+
+### Terminal Output (`chat_formatter.py`)
+
+```
+======================================================================
+SOP: MOTOR BEARING OVERHEATING MAINTENANCE PROCEDURE
+ID: KL_teco_westinghouse_motor_20260803_103000
+Machine Type: Three Phase Induction Motor | Est. Duration: 30-60 minutes
+======================================================================
+
+[SAFETY WARNINGS & PRECAUTIONS]:
+  * Ensure power supply is completely isolated and locked out before inspection.
+  * Use proper personal protective equipment (PPE) including thermal gloves.
+
+[PROCEDURE STEPS] (2 total):
+----------------------------------------------------------------------
+
+  Step 1: [HIGH RISK] Shut down -> motor power supply
+          Condition: Immediately upon detecting bearing temperature exceeding threshold
+          Tool Required: Lockout Tagout Kit / Voltage Tester
+
+  Step 2: [MED RISK] Inspect -> bearing lubrication and cooling fan
+          Condition: Allow motor casing to cool down to safe handling temperature
+          Tool Required: Lubrication Gun / Thermographic Camera
+
+======================================================================
+```
+
+### Knowledge Layer JSON (`knowledge_layer/*.json`)
 
 ```json
 {
-  "procedure_title": "Motor Bearing Maintenance Procedure",
-  "machine_type": "Three Phase Induction Motor",
-  "steps": [
+  "knowledge_id": "KL_teco_westinghouse_motor_20260803_103000",
+  "source_manual": "TECO Westinghouse Motor",
+  "machine_category": "manufacturing",
+  "query_context": "motor bearing overheating maintenance",
+  "trigger_keywords": ["motor", "bearing", "overheating", "maintenance"],
+  "overall_risk_level": "high",
+  "telemetry_triggers": [
     {
-      "step_number": 1,
-      "action": "Shut down",
-      "object": "motor power supply",
-      "condition": "before any maintenance",
-      "risk_level": "high",
-      "required_tool": "voltage tester"
-    },
-    {
-      "step_number": 2,
-      "action": "Inspect",
-      "object": "cooling fan and ventilation openings",
-      "condition": "check for blockage or damage",
-      "risk_level": "medium",
-      "required_tool": null
+      "signal": "placeholder_signal",
+      "threshold": "placeholder_threshold",
+      "status": "unlinked_project3"
     }
   ],
-  "safety_warnings": [
-    "Ensure power is completely off",
-    "Use insulated gloves"
-  ],
-  "estimated_duration": "30-60 minutes"
+  "created_at": "2026-08-03T10:30:00.000000",
+  "sop": {
+    "procedure_title": "Motor Bearing Overheating Maintenance Procedure",
+    "machine_type": "Three Phase Induction Motor",
+    "steps": [
+      {
+        "step_number": 1,
+        "action": "Shut down",
+        "object": "motor power supply",
+        "condition": "Immediately upon detecting bearing temperature exceeding threshold",
+        "risk_level": "high",
+        "required_tool": "Lockout Tagout Kit / Voltage Tester"
+      }
+    ],
+    "safety_warnings": [
+      "Ensure power supply is completely isolated and locked out before inspection."
+    ],
+    "estimated_duration": "30-60 minutes"
+  }
 }
 ```
 
-In the Knowledge Layer, each SOP is enriched further with a unique ID, source manual, industry category, trigger keywords, overall risk level, and a `telemetry_triggers` placeholder field for future use.
-
 ---
 
-## Supported manuals
+## Supported Manuals
 
-Manual Intelligence is designed to work with ten real, publicly available industrial manuals across many industrial sectors.
+ParseOS Manual Intelligence is tested against industrial manuals across multiple sectors:
 
 <details>
-<summary>View the full manual list</summary>
+<summary>View target industrial manual list</summary>
 
-| # | Manual | Industry | Device |
-|---|--------|----------|--------|
+| # | Manual | Industry | Device / Equipment |
+|---|---|---|---|
 | 1 | ABB IRB 120 | Robotics & Assembly | Industrial Robot |
 | 2 | Atlas Copco Compressed Air | Equipment Maintenance | Compressed Air System |
 | 3 | Fisher EZ Easy-E Control Valve | Process Control | Control Valve |
@@ -289,7 +336,7 @@ Manual Intelligence is designed to work with ten real, publicly available indust
 | 9 | Siemens S7-1200 PLC | Industrial Automation | PLC Controller |
 | 10 | Universal Robots UR5 | Robotics & Assembly | Collaborative Robot |
 
-All manuals are publicly available from their respective manufacturers, government sources, or public archives. They are **not** redistributed in this repo — download them into `data/manuals/`.
+Place PDF manuals into `data/manuals/` before running ingestion.
 
 </details>
 
@@ -297,28 +344,12 @@ All manuals are publicly available from their respective manufacturers, governme
 
 ## Limitations
 
-- **Scanned or image-heavy pages** rely on the OCR/vision fallback, which needs `pytesseract` + the Tesseract binary installed (for OCR) and a working API key (for the vision transcription step) — without those, such pages may still return empty text.
-- **FastAPI service** and **React UI** are planned, not yet implemented.
-- Vision-model calls are capped per query (`IMAGE_HEAVY_THRESHOLD`) to stay within free-tier API quotas, so very diagram-heavy queries may only get partial visual context.
-
----
-
-## Contributing
-
-Contributions are welcome. The pipeline is intentionally modular — each stage lives in its own file under `src/` with a clear input, output, and test case.
-
-1. Fork the repository and create a feature branch.
-2. Keep each module's contract clean: one clear input, one clear output, one test.
-3. Open a pull request describing what you changed and why.
-
-A guiding principle from the project philosophy: **never commit code you do not understand.** Understand first, then build.
+- **Scanned Documents**: Require Tesseract OCR installed on the system host.
+- **Visual Page Cap**: Stage 6a limits visual page processing per query (`IMAGE_HEAVY_THRESHOLD`, default: 3) to prevent excessive processing overhead.
+- **API Rate Limits**: Handled gracefully via multi-provider fallback and offline fallback SOP generation when cloud provider quotas are fully exhausted.
 
 ---
 
 ## License
 
-_Not yet chosen._ Pick a license before the public release — MIT is a common default for an open prototype. Once decided, add a `LICENSE` file to the repo root.
-
----
-
-<sub>Manual Intelligence — a research prototype, built stage by stage.</sub>
+*TBD* (MIT recommended for open prototype release).

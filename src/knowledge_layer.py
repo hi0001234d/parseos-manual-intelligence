@@ -48,13 +48,16 @@ def save_to_knowledge_layer(
     # Extract keywords from query
     keywords = list(set(re.findall(r"\b\w{3,}\b", query.lower())))
 
+    is_insufficient = bool(sop_data.get("is_insufficient", False))
+
     kl_entry = {
         "knowledge_id": knowledge_id,
         "source_manual": manual_name,
         "machine_category": category,
         "query_context": query,
         "trigger_keywords": keywords,
-        "overall_risk_level": overall_risk,
+        "overall_risk_level": overall_risk if not is_insufficient else "none",
+        "is_insufficient_evidence": is_insufficient,
         "telemetry_triggers": [
             {
                 "signal": "placeholder_signal",
