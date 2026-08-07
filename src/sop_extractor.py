@@ -368,49 +368,201 @@ def detect_machine_domain(manual_name: str) -> str:
     if any(k in name_lower for k in ("plc", "siemens", "s7")):
         return "plc"
     return "general"
+    
+# ── Base filler words ────────────────────────────────────────────────────────
+# Words that carry zero evidence value and are always stripped before coverage
+# is computed, regardless of query domain.
+STOP_WORDS = {
+    "the", "and", "for", "with", "from", "into",
+    "after", "before", "using", "use", "manual",
+    "machine", "page", "procedure", "operation"
+}
+
+# ── Conversational / query-structural terms ───────────────────────────────────
+# Words that appear in how an operator phrases a question, NOT in manual text.
+# Stripping these prevents natural-language queries from failing coverage checks.
+# Example: "what steps should be followed after an emergency stop" — every
+# bolded word is query structure, not technical manual evidence.
+CONVERSATIONAL_TERMS = {
+    # question words
+    "what", "which", "where", "when", "why", "how",
+    # modal / auxiliary verbs
+    "should", "would", "could", "must", "will", "can",
+    # process / task nouns common in queries but rare in chunk text
+    "steps", "step", "recovery", "recover", "restarting", "restart",
+    "referenced", "reference", "continuing", "continue", "following",
+    "followed", "performed", "perform", "addressed", "ensure", "ensuring",
+    "verify", "verifying", "needed", "needs", "need", "requires", "required",
+    "appear", "appears", "immediately", "correctly", "properly",
+    # role / personnel words
+    "operator", "technician", "maintenance", "user", "personnel",
+    # temporal / logical connectives
+    "during", "while", "once", "then", "also", "only", "still",
+    "longer", "already", "again", "now", "out",
+    # query-structural adjectives
+    "scheduled", "new", "newly", "safely", "safe", "ready",
+    "clear", "cleared", "appropriate", "correct", "proper",
+    # state / condition words common in conversational queries
+    "state", "condition", "situation", "status", "case",
+    "including", "related", "possible", "likely",
+}
+
+# Merge conversational terms into stop-word set so they are excluded at
+# tokenisation, before any coverage calculation.
+STOP_WORDS |= CONVERSATIONAL_TERMS
+
+# ── Universal safety-critical component nouns (Layer 1 — hard-fail) ──────────
+#
+# These terms name PHYSICAL COMPONENTS that appear across virtually every
+# industrial domain. If any of these appear in the query but are ABSENT from
+# the retrieved evidence, the validator will immediately reject the query as
+# INSUFFICIENT_EVIDENCE.
+#
+# Design rules:
+#   • Only include terms that are cross-domain (appear in CNC, pumps, robots,
+#     PLCs, motors, valves, and future domains alike).
+#   • Domain-specific terms (impeller, coolant, manifold, solenoid, pneumatic,
+#     actuator, lubrication) are deliberately excluded here — they are now
+#     captured automatically per-manual by manual_metadata.py and used only
+#     as coverage signals (Layer 2), not hard-fail triggers.
+#   • "pressure" excluded: acts as symptom descriptor in pump/valve queries
+#     ("does not build pressure") rather than a named component noun.
+UNIVERSAL_CRITICAL: frozenset[str] = frozenset({
+    "bearing", "spindle", "servo", "encoder", "hydraulic",
+    "pump", "valve", "motor", "relay", "fuse", "sensor",
+    "brake", "gasket", "seal", "shaft",
+})
+
+# Backward-compatibility alias — any internal code still referencing
+# CRITICAL_TERMS will continue to work without changes.
+CRITICAL_TERMS = UNIVERSAL_CRITICAL
 
 
-CRITICAL_TERMS = {
-    "bearing", "spindle", "servo", "encoder", "hydraulic", "lubrication",
-    "tool changer", "pump", "valve", "motor", "relay", "fuse", "filter",
-    "sensor", "pressure", "voltage", "current", "axis", "solenoid", "brake",
-    "gasket", "manifold", "coolant", "pneumatic", "actuator"
+# Presentation / UI words — excluded from coverage calculation
+# (users often ask for "diagram" or "panel" which may not appear verbatim in chunk text)
+PRESENTATION_TERMS = {
+    "diagram", "figure", "image", "illustration",
+    "panel", "screen", "display", "photo", "chart",
+    "picture", "schematic"
+}
+
+# Generic action/task words — excluded from coverage calculation
+# (e.g. "startup", "operation" are query intent words, not evidence tokens)
+ACTION_TERMS = {
+    "procedure", "operation", "startup", "shutdown",
+    "inspection", "diagnostic", "install",
+    "fails", "fail", "return", "check",
+    "start", "stop", "run", "set", "get"
+    # NOTE: "reset" intentionally excluded — it is a technical expectation in
+    # industrial contexts (CPU MRES, servo reset, safety reset) and should
+    # remain in coverage scoring to verify evidence relevance.
 }
 
 
-def validate_topic_evidence(query: str, evidence_texts: list[str]) -> tuple[bool, dict]:
+def validate_topic_evidence(
+    query: str,
+    evidence_texts: list[str],
+    manual_vocab: set[str] | None = None,
+) -> tuple[bool, dict]:
     """
     Validate whether retrieved evidence actually supports the query topic.
-    Returns (is_valid, coverage_info)
+
+    v3.0 two-tier vocabulary architecture
+    ======================================
+    Tier 0 — STOP_WORDS (includes CONVERSATIONAL_TERMS):
+        Stripped at tokenisation. Structural/filler words that appear in the
+        question but carry no evidence expectation:
+        e.g. "should", "recovery", "technician", "referenced", "restarting".
+
+    Tier 1 — UNIVERSAL_CRITICAL (hard-fail):
+        Cross-domain physical component nouns. If any appear in the query but
+        are absent from evidence, reject immediately.
+        e.g. "spindle", "bearing", "pump", "valve".
+        Domain-specific terms (impeller, coolant, airend …) are NOT in this
+        set — they come from manual_vocab (Tier 2).
+
+    Tier 2 — manual_vocab (coverage signal only — NOT hard-fail):
+        Dynamically extracted per-manual vocabulary (from manual_metadata.py).
+        Terms found in both the query and manual_vocab are guaranteed to
+        participate in coverage scoring even if they were in ACTION_TERMS.
+        Their absence from evidence HURTS the coverage score but does NOT
+        trigger an immediate hard-fail.
+        e.g. for an Atlas Copco manual: {"airend", "aftercooler", "condensate"}
+
+    Tier 3 — PRESENTATION_TERMS + ACTION_TERMS (soft-exclude):
+        Words excluded from coverage scoring because they appear in queries
+        but not necessarily in manual text chunks.
+        Exception: terms explicitly in manual_vocab are protected from this
+        exclusion — if the manual itself uses a word as a technical noun, it
+        should count toward coverage even if it looks like an action word.
+
+    Soft-fail rule: reject only when BOTH coverage < 0.35 AND a critical term
+    is also missing. A lone low-coverage score (caused by conversational
+    phrasing after Tier-0 stripping) is NOT sufficient to block the query.
+
+    Args:
+        query:        The user's natural-language query string.
+        evidence_texts: List of retrieved chunk texts from the vector store.
+        manual_vocab: Dynamic vocabulary loaded from manual metadata JSON
+                      (output of get_combined_vocab()). Pass None to operate
+                      in UNIVERSAL_CRITICAL-only mode (safe fallback).
+
+    Returns:
+        (is_valid: bool, coverage_info: dict)
     """
-    query_terms = {t.lower() for t in re.findall(r"\b[a-zA-Z]{3,}\b", query) if t.lower() not in STOP_WORDS}
+    # Tokenise, strip Tier-0 stop + conversational words
+    query_terms = {
+        t.lower()
+        for t in re.findall(r"\b[a-zA-Z]{3,}\b", query)
+        if t.lower() not in STOP_WORDS
+    }
+    # Edge-case: if every word was stripped, keep them all
     if not query_terms:
         query_terms = {t.lower() for t in re.findall(r"\b[a-zA-Z]{3,}\b", query)}
 
     evidence_blob = " ".join(evidence_texts).lower()
 
+    # ── Full match logging (before any exclusion, for debug visibility) ───────
     matched = sorted([t for t in query_terms if t in evidence_blob])
     missing = sorted([t for t in query_terms if t not in evidence_blob])
 
-    # Critical terms that appear in query
-    critical_in_query = query_terms & CRITICAL_TERMS
-    missing_critical = sorted([t for t in critical_in_query if t not in matched])
+    effective_terms = query_terms - PRESENTATION_TERMS
 
-    coverage = len(matched) / max(len(query_terms), 1)
+    # ── Tier 1: Hard-fail — ONLY on UNIVERSAL_CRITICAL terms ─────────────────
+    # manual_vocab terms are coverage signals, never hard-fail triggers.
+    critical_in_query = effective_terms & UNIVERSAL_CRITICAL
+    missing_critical = sorted([t for t in critical_in_query if t not in evidence_blob])
+
+    # ── Tier 2 + 3: Coverage scoring ─────────────────────────────────────────
+    # Base coverage set: exclude pure action/presentation words.
+    # Exception: if a term is in manual_vocab, restore it even if ACTION_TERMS
+    # would have excluded it — the manual itself uses it as a technical noun.
+    dynamic_vocab = (manual_vocab or set()) - STOP_WORDS
+    query_in_dynamic = effective_terms & dynamic_vocab   # domain-specific query signals
+
+    base_coverage_terms = effective_terms - ACTION_TERMS - PRESENTATION_TERMS
+    # Restore dynamic-vocab terms that were caught by ACTION_TERMS exclusion
+    coverage_terms = base_coverage_terms | query_in_dynamic
+
+    matched_effective = [t for t in coverage_terms if t in evidence_blob]
+    coverage = len(matched_effective) / max(len(coverage_terms), 1)
 
     info = {
         "coverage": round(coverage, 2),
         "matched": matched,
         "missing": missing,
         "missing_critical": missing_critical,
+        "dynamic_signals": sorted(query_in_dynamic),
     }
 
-    # Reject if any critical term present in query is missing from evidence
+    # Hard-fail: a universal safety-critical component is absent from evidence
     if missing_critical:
         return False, info
 
-    # Require at least 70% coverage
-    if coverage < 0.70:
+    # Soft-fail: only when coverage is very low AND a critical term is also
+    # missing. A lone low-coverage score (caused by conversational phrasing
+    # after Tier-0 stripping) is NOT sufficient to block the query.
+    if coverage < 0.35 and missing_critical:
         return False, info
 
     return True, info
@@ -540,7 +692,13 @@ def extract_sop(
     Stage 6b: Takes retrieved text chunks + optional Stage 6a image context,
     invokes LLM, and returns structured JSON SOP. Uses multi-provider fallback,
     and returns offline fallback if all API quotas are exhausted.
+
+    v3.0: Loads dynamic per-manual vocabulary from manual_metadata.py and
+    passes it to validate_topic_evidence() as a coverage signal (Layer 2).
+    Falls back gracefully to UNIVERSAL_CRITICAL-only mode if no metadata found.
     """
+    from src.manual_metadata import get_combined_vocab  # local import avoids circular deps
+
     first_chunk = retrieved_chunks[0] if retrieved_chunks else None
     target_manual_name = (
         first_chunk.manual_name if isinstance(first_chunk, SearchResult)
@@ -558,7 +716,15 @@ def extract_sop(
     if image_context:
         evidence_texts.extend(image_context)
 
-    is_valid, coverage_info = validate_topic_evidence(query=query, evidence_texts=evidence_texts)
+    # v3.0 — load dynamic vocabulary for the retrieved manuals
+    # Fails silently (returns empty set) if metadata files don't exist yet.
+    dynamic_vocab = get_combined_vocab(retrieved_chunks)
+
+    is_valid, coverage_info = validate_topic_evidence(
+        query=query,
+        evidence_texts=evidence_texts,
+        manual_vocab=dynamic_vocab,
+    )
 
     print(
         f"  [Stage 6b] Topic Evidence Coverage: {coverage_info['coverage']} "
@@ -567,7 +733,7 @@ def extract_sop(
     )
 
     if not is_valid:
-        print(f"  [WARN] Pre-LLM Validation Failed! Missing critical terms: {coverage_info['missing_critical']} (Coverage: {coverage_info['coverage']} < 0.70). Rejecting prior to LLM call.")
+        print(f"  [WARN] Pre-LLM Validation Failed! Missing critical terms: {coverage_info['missing_critical']} (Coverage: {coverage_info['coverage']}). Rejecting prior to LLM call.")
         return build_insufficient_evidence_response(
             query=query,
             manual_name=target_manual_name,

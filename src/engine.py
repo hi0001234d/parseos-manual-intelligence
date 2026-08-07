@@ -312,6 +312,24 @@ class SearchEngine:
         except Exception:
             return 0
 
+    def get_manual_text(self, manual_name: str) -> str:
+        """
+        Returns concatenated text of all stored chunks for a manual.
+        Used by the --build-vocab backfill path in ingest_all.py to extract
+        technical vocabulary without re-parsing the original PDF.
+        Returns empty string if the manual is not found or on any error.
+        """
+        try:
+            col = self._get_chroma_collection()
+            result = col.get(
+                where={"manual": manual_name},
+                include=["documents"],
+            )
+            docs = result.get("documents") or []
+            return " ".join(docs)
+        except Exception:
+            return ""
+
     def _delete_manual_chunks(self, manual_name: str) -> None:
         try:
             col      = self._get_chroma_collection()
