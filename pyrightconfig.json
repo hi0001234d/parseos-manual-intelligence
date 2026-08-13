@@ -1,0 +1,10 @@
+{
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Windows",
+  "pythonPath": "D:\\Users\\janvi\\anaconda3\\python.exe",
+  "extraPaths": [
+    "D:\\Users\\janvi\\anaconda3\\Lib\\site-packages"
+  ],
+  "reportMissingModuleSource": false,
+  "reportMissingImports": false
+}

@@ -18,7 +18,8 @@ from pathlib import Path
 from PIL import Image
 from openai import OpenAI
 
-import requests
+import requests  # type: ignore[import-untyped]
+
 
 from src.config import (
     IMAGE_HEAVY_THRESHOLD,

@@ -10,7 +10,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 try:
-    from colorama import Fore, Style, init
+    from colorama import Fore, Style, init  # type: ignore[import-untyped]
     init(autoreset=True)
     COLOR_ENABLED = True
 except ImportError:

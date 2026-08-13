@@ -1,4 +1,4 @@
-# ParseOS Manual Intelligence (v2.0)
+# ParseOS Manual Intelligence (v3.0)
 
 ### An AI engine that turns industrial manuals into structured, queryable procedures
 
@@ -9,6 +9,7 @@
 ![Framework](https://img.shields.io/badge/framework-LlamaIndex-orange)
 ![Vector DB](https://img.shields.io/badge/vector--db-ChromaDB-red)
 ![LLMs](https://img.shields.io/badge/LLMs-Groq%20%7C%20Gemini%20%7C%20OpenRouter%20%7C%20OpenAI-purple)
+![Manuals](https://img.shields.io/badge/manuals-141%20ingested-brightgreen)
 
 ---
 
@@ -24,32 +25,43 @@ ParseOS Manual Intelligence replaces manual search with instant, structured proc
 
 ## What It Actually Is
 
-Manual Intelligence is **not** a simple chatbot and **not** a standard document Q&A search tool. It is a **structured knowledge extraction engine** powered by a **Deferred-Vision RAG Architecture (v2.0)**.
+Manual Intelligence is **not** a simple chatbot and **not** a standard document Q&A search tool. It is a **structured knowledge extraction engine** powered by a **Deferred-Vision RAG Architecture** with an **Adaptive Vocabulary System**.
 
 The core asset produced is the **ParseOS Knowledge Layer**: a persistent library of machine-readable SOPs, each serving as an actionable unit of industrial intelligence that downstream automation systems, SCADA triggers, or technician interfaces can query.
 
+### What's New in v3.0
+
+- **Adaptive Per-Manual Vocabulary** — Technical terms are automatically extracted during ingestion and used for intelligent evidence validation (replaces hardcoded domain vocabulary)
+- **Two-Tier Validation Architecture** — Universal safety-critical terms (hard-fail) + dynamic per-manual vocabulary (coverage signal)
+- **Batched Ingestion** — Large manuals (1000+ pages) are ingested in page batches to avoid ChromaDB's batch size limits
+- **Reorganized Knowledge Layer** — SOP outputs and manual metadata stored in dedicated subdirectories
+- **141 Industrial Manuals** — Expanded from 10 test manuals to 141 production manuals across robotics, CNC, pumps, valves, PLCs, and more
+
 ---
 
-## How It Works (v2.0 Architecture)
+## How It Works (v3.0 Architecture)
 
-ParseOS Manual Intelligence operates via a 7-stage retrieval-augmented generation (RAG) pipeline built on LlamaIndex.
+ParseOS Manual Intelligence operates via a 7-stage retrieval-augmented generation (RAG) pipeline built on LlamaIndex, enhanced with a two-tier adaptive vocabulary validation system.
 
 ```mermaid
 flowchart TD
     A([PDF Manual]) --> B[Stage 1: PyMuPDF Text Extraction + OCR Fallback]
     B --> C[Visual Content Detection & Pre-Rendering]
     C --> D[Stage 2-4: LlamaIndex SentenceSplitter + ChromaDB Vector Index]
+    D --> V[v3.0: Extract Per-Manual Technical Vocabulary]
+    V --> MD[(knowledge_layer/manual_metadata/)]
     
     Q([User Query]) --> E[Stage 5: Semantic Retrieval - SearchEngine]
     D --> E
     
     E --> F{Stage 6a: Visual Pages Flagged?}
-    F -- Yes (Cap <= 3) --> G[Local Visual Predictor API / Cloud VLM Fallback]
-    F -- No --> H[Stage 6b: Multi-Provider LLM SOP Reasoning]
+    F -- Yes Cap <= 3 --> G[Local Visual Predictor API / Cloud VLM Fallback]
+    F -- No --> H[Stage 6b: Two-Tier Validation + Multi-Provider LLM]
     G --> H
+    MD -.-> H
     
     H --> I[/Structured SOP JSON Output/]
-    I --> J[(Stage 7: ParseOS Knowledge Layer Store)]
+    I --> J[(Stage 7: knowledge_layer/sops/)]
 ```
 
 ### The 7 Pipeline Stages
@@ -62,8 +74,8 @@ flowchart TD
 | **4 · Store** | **Vector Database Indexing** | Persists vector embeddings and metadata in a local ChromaDB collection (`manual_knowledge`). | ChromaDB (`PersistentClient`) |
 | **5 · Search** | **Semantic Retrieval** | Performs cosine similarity search for relevant manual chunks, filtered optionally by specific manual target. Returns structured `SearchResult` objects. | LlamaIndex `VectorStoreIndex` |
 | **6a · Visual Context** | **Deferred Visual Processing** | Interrogates flagged visual pages at query time using a primary Local Visual Predictor API (`POST /predict`), falling back to Cloud VLMs (Gemini/OpenRouter/OpenAI). Enforces an `IMAGE_HEAVY_THRESHOLD` hard cap (max 3 images) and caches results in `data/vlm_cache/`. | Local Predictor API, Gemini Vision / GPT-4o-mini |
-| **6b · Reason & Validate** | **Pre-LLM Evidence Validation & Multi-Provider SOP Extraction** | Evaluates retrieved context via `validate_topic_evidence` for critical industrial terms and 70% topic coverage *prior* to calling the LLM. Immediately returns a structured `INSUFFICIENT EVIDENCE` response if critical query terms are missing, preventing token waste and hallucinations. If valid, extracts structured JSON SOP with evidence page mapping (`source_page`, `evidence`) via multi-provider fallback (Groq → Gemini → OpenRouter → OpenAI). | Groq (`llama-3.3-70b-versatile`), Gemini 2.0 Flash, OpenAI |
-| **7 · Knowledge Layer** | **Persistence & Schema Enrichment** | Enriches SOPs with unique IDs (`KL_<manual>_<timestamp>`), query metadata, keyword triggers, overall risk evaluation, and telemetry placeholder hooks for downstream integration. | JSON Knowledge Store |
+| **6b · Reason & Validate** | **Two-Tier Evidence Validation & Multi-Provider SOP Extraction** | **Tier 1 (Hard-fail):** Checks for `UNIVERSAL_CRITICAL` component nouns (bearing, spindle, pump, valve…) — rejects immediately if a critical term is absent from evidence. **Tier 2 (Coverage signal):** Loads dynamic per-manual vocabulary from `manual_metadata.py` and scores evidence overlap — low coverage hurts scoring but does not hard-fail. Extracts structured JSON SOP via multi-provider fallback (Groq → Gemini → OpenRouter → OpenAI). | Groq (`llama-3.3-70b-versatile`), Gemini 2.0 Flash, OpenAI |
+| **7 · Knowledge Layer** | **Persistence & Schema Enrichment** | Enriches SOPs with unique IDs (`KL_<manual>_<timestamp>`), query metadata, keyword triggers, overall risk evaluation, and telemetry placeholder hooks for downstream integration. Saves to `knowledge_layer/sops/`. | JSON Knowledge Store |
 
 ---
 
@@ -89,26 +101,32 @@ flowchart TD
 parseos-manual-intelligence/
 │
 ├── data/
-│   ├── manuals/                 # Source PDF manuals directory
+│   ├── manuals/                 # Source PDF manuals (141 files)
 │   ├── page_images/             # Pre-rendered page layout PNGs (cached during ingestion)
 │   └── vlm_cache/               # Cached visual transcription JSON outputs
 │
 ├── src/
+│   ├── __init__.py               # Package initializer
 │   ├── config.py                 # Central configuration and .env manager
 │   ├── pdf_parser.py             # Stage 1: Text extraction, OCR fallback, visual heuristics
 │   ├── engine.py                 # Stages 2–5: LlamaIndex chunking, embeddings, ChromaDB, search
-│   ├── sop_extractor.py          # Stage 6a & 6b: Local Predictor API / VLM & multi-provider LLM extraction
+│   ├── sop_extractor.py          # Stage 6a & 6b: Visual processing & multi-provider LLM extraction
 │   ├── knowledge_layer.py        # Stage 7: Knowledge Layer JSON storage & schema enrichment
+│   ├── manual_metadata.py        # v3.0: Per-manual technical vocabulary extraction & persistence
 │   ├── api_retry.py              # Exponential backoff retry wrapper for API calls
 │   └── chat_formatter.py         # Terminal output renderer with risk badges
 │
-├── chroma_storage/               # ChromaDB persistent vector database directory
-├── knowledge_layer/              # Extracted JSON SOP files directory
+├── chroma_storage/               # ChromaDB persistent vector database (~1+ GB)
+│
+├── knowledge_layer/
+│   ├── sops/                     # Extracted SOP JSON files (KL_*.json)
+│   └── manual_metadata/          # Per-manual technical vocabulary JSON files
 │
 ├── parseos_pipeline.py            # Master CLI pipeline runner & interactive chat mode
-├── ingest_all.py                  # Batch ingestion script for all manuals
+├── ingest_all.py                  # Batch ingestion script for all manuals (with vocab extraction)
 ├── verify.py                      # Stage 0–7 milestone verification test suite
 ├── requirements.txt                # Project python dependencies
+├── pyrightconfig.json              # Pyright type checker configuration
 ├── .env                            # Environment variables & API keys configuration
 └── README.md
 ```
@@ -228,11 +246,23 @@ Inside Chat Mode:
 Ingest every PDF located in `data/manuals/` in a single run:
 
 ```bash
+# Ingest all manuals (skips already-stored ones)
 python ingest_all.py
 
 # Force re-ingestion of all manuals
 python ingest_all.py --force
+
+# Generate/refresh vocabulary for already-ingested manuals (no re-ingestion)
+python ingest_all.py --build-vocab
+
+# Full re-ingest + rebuild vocabulary
+python ingest_all.py --force --build-vocab
+
+# Verbose output for debugging
+python ingest_all.py --verbose
 ```
+
+> **Large Manuals:** Documents with 1000+ pages are automatically batched in groups of 100 pages to stay within ChromaDB's batch size limits.
 
 ---
 
@@ -275,7 +305,7 @@ Machine Type: Three Phase Induction Motor | Est. Duration: 30-60 minutes
 ======================================================================
 ```
 
-### Knowledge Layer JSON (`knowledge_layer/*.json`)
+### Knowledge Layer JSON (`knowledge_layer/sops/*.json`)
 
 ```json
 {
@@ -318,23 +348,22 @@ Machine Type: Three Phase Induction Motor | Est. Duration: 30-60 minutes
 
 ## Supported Manuals
 
-ParseOS Manual Intelligence is tested against industrial manuals across multiple sectors:
+ParseOS Manual Intelligence is production-tested against **141 industrial manuals** across multiple sectors:
 
 <details>
-<summary>View target industrial manual list</summary>
+<summary>View supported industrial domains (141 manuals)</summary>
 
-| # | Manual | Industry | Device / Equipment |
-|---|---|---|---|
-| 1 | ABB IRB 120 | Robotics & Assembly | Industrial Robot |
-| 2 | Atlas Copco Compressed Air | Equipment Maintenance | Compressed Air System |
-| 3 | Fisher EZ Easy-E Control Valve | Process Control | Control Valve |
-| 4 | Grundfos CR-CRN Multistage Pump | Equipment Maintenance | Multistage Centrifugal Pump |
-| 5 | Haas Mill | Manufacturing | CNC Milling Machine |
-| 6 | Maintenance Manual v3.2.1 | Equipment Maintenance | Industrial Equipment |
-| 7 | TECO Westinghouse Motor | Manufacturing | Electric Motor |
-| 8 | Industrial Pump | Equipment Maintenance | Industrial Pump |
-| 9 | Siemens S7-1200 PLC | Industrial Automation | PLC Controller |
-| 10 | Universal Robots UR5 | Robotics & Assembly | Collaborative Robot |
+| Domain | Example Manuals | Count |
+|---|---|---|
+| **Robotics & Assembly** | ABB IRB 120/2600/6700/1200, Universal Robots UR5/UR5e/UR12e, Fanuc R-30iB, Dobot VX500 | 25+ |
+| **CNC & Manufacturing** | Haas Mill (VF-2, NGC), English Mill Interactive Manual | 10+ |
+| **Process Control & Valves** | Fisher EZ Easy-E, GX Control Valve, Spence K1/K4/K5/K6, Bettis ECAT, Yarway 7100 | 20+ |
+| **Pumps & Compressors** | Grundfos CR-CRN, Atlas Copco GA-30, Industrial Pump | 5+ |
+| **PLCs & Industrial Automation** | Siemens S7-1200/S7-1500, ET200SP/ET200eco, SIMOTION, Fail-Safe Modules | 15+ |
+| **Instrumentation & Analyzers** | Rosemount CT5400, Yokogawa IM series, BINOS 100 Series | 10+ |
+| **Aerospace & Systems Engineering** | NASA Systems Engineering Handbook, FAA Handbooks (PHAK), SE Guidebook | 15+ |
+| **Infrastructure & Construction** | EM 385-1-1 Safety Manual, EM 1110-2-2901, FAA 150-5380-6C | 10+ |
+| **General Industrial** | ATV600 Programming Manual, FlexiBowl User Guide, Compressed Air Manual | 30+ |
 
 Place PDF manuals into `data/manuals/` before running ingestion.
 
@@ -347,6 +376,7 @@ Place PDF manuals into `data/manuals/` before running ingestion.
 - **Scanned Documents**: Require Tesseract OCR installed on the system host.
 - **Visual Page Cap**: Stage 6a limits visual page processing per query (`IMAGE_HEAVY_THRESHOLD`, default: 3) to prevent excessive processing overhead.
 - **API Rate Limits**: Handled gracefully via multi-provider fallback and offline fallback SOP generation when cloud provider quotas are fully exhausted.
+- **ChromaDB Batch Limits**: Documents over ~700 pages may produce chunks exceeding ChromaDB's 5461 batch limit. This is handled automatically via batched ingestion (100 pages per batch).
 
 ---
 

@@ -19,7 +19,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # ── Project root on sys.path ──────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -175,7 +175,7 @@ class SearchEngine:
                     text=p["text"],
                     metadata={
                         "manual":             manual_name,
-                        "source_path":        str(pdf_path),
+                        "source_path":        pdf_path,
                         "page_count":         pages_count,
                         "page":               p["page_num"],
                         "has_visual_content": p.get("has_visual_content", False),
@@ -192,16 +192,34 @@ class SearchEngine:
             paragraph_separator="\n\n",
         )
 
-        pipeline = IngestionPipeline(
-            transformations=[
-                splitter,
-                self._get_embed_model(),
-            ],
-            vector_store=self._get_vector_store(),
-        )
+        # ── Batch ingestion to avoid ChromaDB max batch size limit (5461) ────
+        # Large manuals (1000+ pages) can produce 8000+ chunks, exceeding
+        # ChromaDB's single-insert cap.  Process in document batches of 100
+        # pages to keep each pipeline run well within the limit.
+        BATCH_SIZE = 100
+        all_nodes = []
 
-        print(f"  [SearchEngine] Running IngestionPipeline for '{manual_name}' …")
-        nodes = pipeline.run(documents=documents, show_progress=False)
+        print(f"  [SearchEngine] Running IngestionPipeline for '{manual_name}' ({len(documents)} pages) …")
+
+        for batch_start in range(0, len(documents), BATCH_SIZE):
+            batch_docs = documents[batch_start : batch_start + BATCH_SIZE]
+            batch_num  = (batch_start // BATCH_SIZE) + 1
+            total_batches = (len(documents) + BATCH_SIZE - 1) // BATCH_SIZE
+
+            if total_batches > 1:
+                print(f"    [Batch {batch_num}/{total_batches}] Processing pages {batch_start + 1}-{batch_start + len(batch_docs)} …")
+
+            pipeline = IngestionPipeline(
+                transformations=[
+                    splitter,
+                    self._get_embed_model(),
+                ],
+                vector_store=self._get_vector_store(),
+            )
+            batch_nodes = pipeline.run(documents=batch_docs, show_progress=False)
+            all_nodes.extend(batch_nodes)
+
+        nodes = all_nodes
 
         # Patch metadata indexes for backward compatibility checking
         for i, node in enumerate(nodes):
@@ -255,9 +273,10 @@ class SearchEngine:
             meta  = node.metadata or {}
             distance = max(0.0, 1.0 - score)
 
+            from llama_index.core.schema import MetadataMode
             results.append(
                 SearchResult(
-                    chunk_text=node.get_content(metadata_mode="none"),
+                    chunk_text=node.get_content(metadata_mode=MetadataMode.NONE),
                     manual_name=meta.get("manual", "unknown"),
                     chunk_index=int(meta.get("chunk_index", -1)),
                     distance=distance,
@@ -296,7 +315,12 @@ class SearchEngine:
         try:
             col    = self._get_chroma_collection()
             result = col.get(include=["metadatas"], limit=100_000)
-            names  = sorted({m["manual"] for m in result["metadatas"] if "manual" in m})
+            metadatas = result["metadatas"] or []
+            names  = sorted({
+                str(m["manual"])
+                for m in metadatas
+                if isinstance(m, dict) and "manual" in m
+            })
             return names
         except Exception:
             return []

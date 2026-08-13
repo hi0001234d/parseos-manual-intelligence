@@ -14,7 +14,7 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 CHROMA_PATH     = str(_PROJECT_ROOT / "chroma_storage")
-KNOWLEDGE_PATH  = str(_PROJECT_ROOT / "knowledge_layer")
+KNOWLEDGE_PATH  = str(_PROJECT_ROOT / "knowledge_layer" / "sops")
 MANUALS_PATH    = str(_PROJECT_ROOT / "data" / "manuals")
 PAGE_IMAGES_PATH = str(_PROJECT_ROOT / "data" / "page_images")
 VLM_CACHE_PATH   = str(_PROJECT_ROOT / "data" / "vlm_cache")

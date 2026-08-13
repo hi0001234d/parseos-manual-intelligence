@@ -5,7 +5,8 @@
 
 # ── Generated data (large, reproducible) ─────────────────────────────────────
 chroma_storage/
-knowledge_layer/
+knowledge_layer/sops/
+knowledge_layer/manual_metadata/
 data/page_images/
 data/vlm_cache/
 
@@ -43,3 +44,5 @@ test_output/
 # ── Jupyter ───────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb
+data/manuals/*.pdf
+data/manuals/

@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Storage directory ─────────────────────────────────────────────────────────
@@ -220,7 +220,7 @@ def save_manual_metadata(
     payload = {
         "manual":          manual_name,
         "domain":          domain or detect_domain(manual_name),
-        "ingested_at":     datetime.utcnow().isoformat(),
+        "ingested_at":     datetime.now(timezone.utc).isoformat(),
         "technical_terms": sorted(terms),
         "term_count":      len(terms),
     }
