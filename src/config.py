@@ -42,6 +42,15 @@ TOP_K_RESULTS   = int(os.getenv("TOP_K_RESULTS", "3"))
 # ── Vision Cap ───────────────────────────────────────────────────────────────
 IMAGE_HEAVY_THRESHOLD = int(os.getenv("IMAGE_HEAVY_THRESHOLD", "3"))
 
+# ── Sub-Topic Coverage Gap Thresholds ────────────────────────────────────────
+# Used by decompose_query_topics / score_subtopic_coverage in sop_extractor.py
+# to classify each sub-topic's evidence coverage:
+#   coverage < NOT_FOUND  → "not_found"
+#   NOT_FOUND ≤ coverage < PARTIAL → "partial"
+#   coverage ≥ PARTIAL    → "covered"
+SUBTOPIC_NOT_FOUND_THRESHOLD = float(os.getenv("SUBTOPIC_NOT_FOUND_THRESHOLD", "0.20"))
+SUBTOPIC_PARTIAL_THRESHOLD   = float(os.getenv("SUBTOPIC_PARTIAL_THRESHOLD", "0.50"))
+
 # ── Local Visual Predictor API Endpoint ───────────────────────────────────────
 PREDICT_API_URL = os.getenv("PREDICT_API_URL", "http://192.168.0.128/predict")
 

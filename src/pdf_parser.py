@@ -178,7 +178,7 @@ def extract_text_with_metadata(
 
     for page_num in range(len(doc)):
         page = doc[page_num]
-        text = page.get_text().strip()
+        text = str(page.get_text()).strip()
         ocr_used = False
 
         # OCR fallback for scanned pages

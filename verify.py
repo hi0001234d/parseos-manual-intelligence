@@ -10,7 +10,7 @@ from pathlib import Path
 
 # Force UTF-8 stdout encoding for Windows console compatibility
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore
 
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent))

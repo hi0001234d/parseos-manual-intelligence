@@ -58,6 +58,8 @@ def save_to_knowledge_layer(
         "trigger_keywords": keywords,
         "overall_risk_level": overall_risk if not is_insufficient else "none",
         "is_insufficient_evidence": is_insufficient,
+        "coverage_gaps": sop_data.get("coverage_gaps", []),
+        "subtopic_coverage": sop_data.get("subtopic_coverage", []),
         "telemetry_triggers": [
             {
                 "signal": "placeholder_signal",

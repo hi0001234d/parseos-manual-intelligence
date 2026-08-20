@@ -23,6 +23,7 @@ industrial nomenclature:
 from __future__ import annotations
 
 import json
+import typing
 import re
 from collections import Counter
 from datetime import datetime, timezone
@@ -254,7 +255,7 @@ def load_manual_vocab(manual_name: str) -> set[str]:
         return set()
 
 
-def get_combined_vocab(retrieved_chunks: list) -> set[str]:
+def get_combined_vocab(retrieved_chunks: typing.Sequence[typing.Any]) -> set[str]:
     """
     Loads and unions the dynamic technical vocabulary for **all** manuals
     referenced in ``retrieved_chunks``.
@@ -284,3 +285,24 @@ def get_combined_vocab(retrieved_chunks: list) -> set[str]:
         combined |= vocab
 
     return combined
+
+
+def load_all_known_vocab() -> set[str]:
+    """
+    Loads and unions all dynamic technical terms across ALL ingested manual metadata files
+    stored in ``knowledge_layer/manual_metadata/``.
+    """
+    if not MANUAL_METADATA_DIR.exists():
+        return set()
+
+    combined: set[str] = set()
+    for json_file in MANUAL_METADATA_DIR.glob("*.json"):
+        try:
+            with open(json_file, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            combined.update(data.get("technical_terms", []))
+        except Exception:
+            pass
+
+    return combined
+

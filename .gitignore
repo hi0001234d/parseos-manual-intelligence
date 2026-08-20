@@ -44,5 +44,8 @@ test_output/
 # ── Jupyter ───────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb
-data/manuals/*.pdf
-data/manuals/
+
+
+data/manuals/et200sp_manual_collection_en-US_en-US.pdf
+data/manuals/fail_safe_modules_manual_collection_en-US_en-US.pdf
+data/manuals/s7-1500_manual_collection_en-US_en-US.pdf

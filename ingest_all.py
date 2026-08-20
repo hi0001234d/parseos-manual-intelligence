@@ -21,9 +21,10 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -62,7 +63,7 @@ def ingest_manual(
     v3.0: After ingestion, extracts and saves per-manual technical vocabulary.
     """
     manual_name = Path(pdf_path).stem
-    result = {
+    result: dict[str, Any] = {
         "manual":   manual_name,
         "path":     pdf_path,
         "status":   "pending",

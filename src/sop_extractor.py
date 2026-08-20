@@ -12,8 +12,9 @@ import json
 import base64
 import io
 import re
+from dataclasses import dataclass, field
 import time
-from typing import Any
+from typing import Any, Sequence
 from pathlib import Path
 from PIL import Image
 from openai import OpenAI
@@ -32,6 +33,8 @@ from src.config import (
     GROQ_MODEL,
     INGEST_VLM_MODEL,
     PREDICT_API_URL,
+    SUBTOPIC_NOT_FOUND_THRESHOLD,
+    SUBTOPIC_PARTIAL_THRESHOLD,
 )
 from src.api_retry import retry_with_backoff
 from src.engine import SearchResult
@@ -160,7 +163,7 @@ def _extract_content(response: Any, provider_type: str = "openai") -> str:
 # ── Stage 6a: Conditional Visual Processing ───────────────────────────────────
 
 def resolve_visual_context(
-    retrieved_chunks: list[SearchResult | dict],
+    retrieved_chunks: Sequence[SearchResult | dict],
     user_query: str = "",
     max_images: int = IMAGE_HEAVY_THRESHOLD,
 ) -> list[str]:
@@ -460,6 +463,255 @@ ACTION_TERMS = {
 }
 
 
+# ── Domain-Critical Terms for Sub-Topic Coverage Weighting ───────────────────
+# When these terms appear in a sub-topic's term set but are ALL absent from
+# evidence, the sub-topic is forced to "not_found" regardless of ratio score.
+# This prevents generic filler words (e.g. "requirements") from inflating
+# coverage for sub-topics whose core concepts are completely missing.
+DOMAIN_CRITICAL_TERMS: frozenset[str] = frozenset({
+    "lockout", "tagout", "isolation", "deenergize", "disconnect",
+    "loto", "energize", "energized", "interlock", "grounding",
+})
+
+# ── Compound Phrases — False Conjunction Safeguard ───────────────────────────
+# Phrases that look like conjunctions but are compound noun phrases.
+# If any of these appear verbatim in the query, the conjunction is NOT split.
+COMPOUND_PHRASES: frozenset[str] = frozenset({
+    "installation and operation",
+    "operation and maintenance",
+    "safety and handling",
+    "care and maintenance",
+    "setup and configuration",
+    "start and stop",
+    "lock and tag",
+    "test and measurement",
+    "input and output",
+    "supply and return",
+})
+
+# ── Conjunction pattern for sub-topic splitting ──────────────────────────────
+# NOTE: 'or' is deliberately excluded — it typically joins alternatives within
+# a single topic ("lockout or isolation requirements") rather than separating
+# distinct topics.  Only 'and', commas, 'as well as', and 'including' trigger
+# sub-topic decomposition.
+_CONJUNCTION_PATTERN = re.compile(
+    r"\s*(?:,?\s+and\s+|,\s+|\s+as well as\s+|\s+including\s+)\s*",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class QuerySubTopic:
+    """Represents one sub-topic extracted from a multi-topic query."""
+    label: str
+    terms: set[str] = field(default_factory=set)
+
+
+def decompose_query_topics(query: str) -> list[QuerySubTopic]:
+    """
+    Splits a multi-topic query into distinct sub-topics using conjunction
+    detection. Applies compound-phrase safeguards and modifier propagation.
+
+    Design:
+    - Conjunction-level splitting only (no semantic parsing).
+    - Compound phrases (e.g. "installation and operation") are protected.
+    - Trailing modifiers shared across sub-topics are propagated.
+      e.g. "electrical and mechanical safety warnings"
+        -> ["electrical safety warnings", "mechanical safety warnings"]
+
+    Returns:
+        List of QuerySubTopic instances. Single-topic queries return a list
+        with one element (no decomposition applied).
+    """
+    # ── Strip leading action/intent verbs common in queries ───────────────
+    # e.g. "Extract all electrical safety..." -> "electrical safety..."
+    query_clean = re.sub(
+        r"^(extract|list|find|show|get|identify|describe|what are the|what are)\s+(all\s+)?",
+        "", query, flags=re.IGNORECASE,
+    ).strip()
+    if not query_clean:
+        query_clean = query.strip()
+
+    # ── Strip trailing meta-phrases ──────────────────────────────────────
+    # e.g. "...mentioned in the manual" -> remove
+    query_clean = re.sub(
+        r"\s+(mentioned|found|listed|described|specified|stated|given|provided)"
+        r"\s+(in|within|on|from)\s+(the\s+)?(manual|document|pdf|page)s?\.?$",
+        "", query_clean, flags=re.IGNORECASE,
+    ).strip()
+
+    # ── Compound phrase protection ───────────────────────────────────────
+    query_lower = query_clean.lower()
+    for phrase in COMPOUND_PHRASES:
+        if phrase in query_lower:
+            # This query contains a compound noun phrase -- don't split it
+            terms = _tokenize_subtopic(query_clean)
+            return [QuerySubTopic(label=query_clean.strip(), terms=terms)]
+
+    # ── Conjunction splitting ────────────────────────────────────────────
+    fragments = _CONJUNCTION_PATTERN.split(query_clean)
+    fragments = [f.strip() for f in fragments if f.strip()]
+
+    if len(fragments) <= 1:
+        terms = _tokenize_subtopic(query_clean)
+        return [QuerySubTopic(label=query_clean.strip(), terms=terms)]
+
+    # ── Modifier propagation ─────────────────────────────────────────────
+    # Detect shared trailing modifier in the last fragment.
+    # e.g. fragments = ["electrical", "mechanical safety warnings"]
+    #   -> last_terms = ["mechanical", "safety", "warnings"]
+    #   -> modifier candidates = ["safety", "warnings"] (non-STOP words from end)
+    # If a preceding fragment has <=1 content term, propagate the modifier.
+    last_terms = re.findall(r"\b[a-zA-Z]{3,}\b", fragments[-1])
+    modifier_words: list[str] = []
+    for word in reversed(last_terms):
+        if word.lower() not in STOP_WORDS:
+            modifier_words.insert(0, word)
+        else:
+            break
+
+    subtopics: list[QuerySubTopic] = []
+    for i, frag in enumerate(fragments):
+        content_words = [
+            w for w in re.findall(r"\b[a-zA-Z]{3,}\b", frag)
+            if w.lower() not in STOP_WORDS
+        ]
+
+        # If fragment is too thin (<=1 content term) and it's not the last,
+        # propagate modifier from the last fragment.
+        if len(content_words) < 2 and i < len(fragments) - 1 and modifier_words:
+            # Avoid duplicating modifier words already in the fragment
+            existing_lower = {w.lower() for w in content_words}
+            additions = [w for w in modifier_words if w.lower() not in existing_lower]
+            enriched_label = frag + " " + " ".join(additions)
+            terms = _tokenize_subtopic(enriched_label)
+            subtopics.append(QuerySubTopic(label=enriched_label.strip(), terms=terms))
+        else:
+            terms = _tokenize_subtopic(frag)
+            # Skip fragments where ALL terms were stop-words
+            if terms:
+                subtopics.append(QuerySubTopic(label=frag.strip(), terms=terms))
+
+    # Fallback: if decomposition produced nothing, return single topic
+    if not subtopics:
+        terms = _tokenize_subtopic(query_clean)
+        return [QuerySubTopic(label=query_clean.strip(), terms=terms)]
+
+    return subtopics
+
+
+def _tokenize_subtopic(text: str) -> set[str]:
+    """Tokenize a sub-topic label, stripping STOP_WORDS."""
+    raw = {t.lower() for t in re.findall(r"\b[a-zA-Z]{3,}\b", text)}
+    filtered = raw - STOP_WORDS
+    return filtered if filtered else raw
+
+
+def score_subtopic_coverage(
+    subtopic: QuerySubTopic,
+    evidence_blob: str,
+    retrieved_pages: list[int],
+) -> dict:
+    """
+    Score a single sub-topic's coverage against the evidence blob.
+
+    Uses critical-term weighting: if the sub-topic contains any
+    DOMAIN_CRITICAL_TERMS and NONE of them match the evidence, the sub-topic
+    is forced to 'not_found' regardless of ratio score.
+
+    Returns dict with keys: label, coverage, status, matched, missing,
+    matched_pages, searched_pages, note.
+    """
+    terms = subtopic.terms - PRESENTATION_TERMS - ACTION_TERMS
+    if not terms:
+        terms = subtopic.terms  # fallback: keep all if everything was excluded
+
+    matched = sorted([t for t in terms if t in evidence_blob])
+    missing = sorted([t for t in terms if t not in evidence_blob])
+
+    ratio = len(matched) / max(len(terms), 1)
+
+    # ── Critical-term weighting ──────────────────────────────────────────
+    critical_in_subtopic = terms & DOMAIN_CRITICAL_TERMS
+    if critical_in_subtopic and not any(t in evidence_blob for t in critical_in_subtopic):
+        # Domain-critical terms are ALL absent -> force not_found
+        status = "not_found"
+        ratio = 0.0
+        note = (
+            f"No explicit {subtopic.label} content was identified in the "
+            f"retrieved sections (pages {', '.join(str(p) for p in retrieved_pages)})."
+        )
+    elif ratio < SUBTOPIC_NOT_FOUND_THRESHOLD:
+        status = "not_found"
+        note = (
+            f"No explicit {subtopic.label} content was identified in the "
+            f"retrieved sections (pages {', '.join(str(p) for p in retrieved_pages)})."
+        )
+    elif ratio < SUBTOPIC_PARTIAL_THRESHOLD:
+        status = "partial"
+        note = (
+            f"Only partial evidence for {subtopic.label} was found. "
+            f"Missing concepts: {', '.join(missing)}."
+        )
+    else:
+        status = "covered"
+        note = ""
+
+    return {
+        "label": subtopic.label,
+        "coverage": round(ratio, 2),
+        "status": status,
+        "matched": matched,
+        "missing": missing,
+        "matched_pages": [],  # populated downstream by caller if needed
+        "searched_pages": retrieved_pages,
+        "note": note,
+    }
+
+
+def build_coverage_gap_advisory(
+    subtopic_scores: list[dict],
+) -> str:
+    """
+    Builds a COVERAGE GAP ADVISORY block for injection into the LLM user
+    prompt. Only includes sub-topics with status 'not_found' or 'partial'.
+
+    Returns empty string if all sub-topics are fully covered.
+    """
+    gaps = [s for s in subtopic_scores if s["status"] in ("not_found", "partial")]
+    if not gaps:
+        return ""
+
+    lines = [
+        "--- COVERAGE GAP ADVISORY ---",
+        "The following query sub-topics have INSUFFICIENT or ZERO evidence "
+        "in the retrieved context:",
+        "",
+    ]
+    for g in gaps:
+        status_label = "NOT FOUND" if g["status"] == "not_found" else "PARTIAL"
+        lines.append(
+            f"- \"{g['label']}\" ({status_label}, coverage: {g['coverage']:.2f}, "
+            f"missing terms: {', '.join(g['missing'])})"
+        )
+
+    lines.append("")
+    lines.append(
+        "For sub-topics marked NOT FOUND, you MUST:\n"
+        "- NOT generate steps or claims about them\n"
+        "- Include a \"coverage_gaps\" array in your JSON output listing each "
+        "unsupported sub-topic with keys: \"topic\", \"status\", \"searched_pages\", \"note\"\n"
+        "- State explicitly that these topics were not found in the retrieved sections"
+    )
+    lines.append(
+        "\nFor sub-topics marked PARTIAL, generate steps only for the "
+        "concepts that ARE present in the evidence, and note missing concepts "
+        "in the coverage_gaps array."
+    )
+    lines.append("--- END COVERAGE GAP ADVISORY ---")
+    return "\n".join(lines)
+
+
 def validate_topic_evidence(
     query: str,
     evidence_texts: list[str],
@@ -548,12 +800,23 @@ def validate_topic_evidence(
     matched_effective = [t for t in coverage_terms if t in evidence_blob]
     coverage = len(matched_effective) / max(len(coverage_terms), 1)
 
+    # ── Sub-topic decomposition and per-topic scoring ────────────────────────
+    subtopics = decompose_query_topics(query)
+    # Pages are populated downstream in extract_sop from retrieved_chunks
+
+    subtopic_scores: list[dict] = []
+    if len(subtopics) > 1:
+        for st in subtopics:
+            st_score = score_subtopic_coverage(st, evidence_blob, [])
+            subtopic_scores.append(st_score)
+
     info = {
         "coverage": round(coverage, 2),
         "matched": matched,
         "missing": missing,
         "missing_critical": missing_critical,
         "dynamic_signals": sorted(query_in_dynamic),
+        "subtopic_coverage": subtopic_scores,
     }
 
     # Hard-fail: a universal safety-critical component is absent from evidence
@@ -572,7 +835,7 @@ def validate_topic_evidence(
 def build_insufficient_evidence_response(
     query: str,
     manual_name: str,
-    retrieved_chunks: list[SearchResult | dict],
+    retrieved_chunks: Sequence[SearchResult | dict],
     matched_keywords: list[str],
     missing_keywords: list[str],
     missing_critical: list[str] | None = None,
@@ -621,12 +884,16 @@ def build_insufficient_evidence_response(
 def validate_and_sanitize_sop(
     sop_data: dict,
     manual_name: str,
-    retrieved_chunks: list[SearchResult | dict],
+    retrieved_chunks: Sequence[SearchResult | dict],
     query: str = "",
+    subtopic_scores: list[dict] | None = None,
 ) -> dict:
     """
     Validates extracted SOP JSON against cross-domain contamination and ensures
     evidence/source page mapping. Performs Insufficient Evidence Detection.
+
+    v3.1: Injects coverage_gaps from pre-computed subtopic analysis when the
+    LLM omits them. Qualifies the procedure title when not_found topics exist.
     """
     domain = detect_machine_domain(manual_name)
     forbidden = MACHINE_DOMAIN_FORBIDDEN_TERMS.get(domain, [])
@@ -680,12 +947,57 @@ def validate_and_sanitize_sop(
 
     sop_data["safety_warnings"] = sanitized_warnings
 
+    # ── Coverage gap fallback injection ──────────────────────────────────────
+    # If subtopic analysis detected gaps but the LLM omitted coverage_gaps,
+    # inject them from the pre-computed scores as a safety net.
+    if subtopic_scores:
+        gaps_from_scores = [
+            {
+                "topic": s["label"],
+                "status": s["status"],
+                "searched_pages": s["searched_pages"],
+                "note": s["note"],
+            }
+            for s in subtopic_scores
+            if s["status"] in ("not_found", "partial")
+        ]
+
+        llm_gaps = sop_data.get("coverage_gaps", [])
+        if gaps_from_scores and not llm_gaps:
+            # LLM didn't produce coverage_gaps — inject from analysis
+            sop_data["coverage_gaps"] = gaps_from_scores
+            print(f"  [Sanitizer] Injected {len(gaps_from_scores)} coverage gap(s) from subtopic analysis.")
+        elif gaps_from_scores and llm_gaps:
+            # Merge: keep LLM gaps but add any missing ones from analysis
+            llm_topics = {g.get("topic", "").lower() for g in llm_gaps}
+            for g in gaps_from_scores:
+                if g["topic"].lower() not in llm_topics:
+                    llm_gaps.append(g)
+            sop_data["coverage_gaps"] = llm_gaps
+
+        # ── Title qualification (only for not_found topics) ──────────────
+        not_found_topics = [
+            s["label"] for s in subtopic_scores
+            if s["status"] == "not_found"
+        ]
+        if not_found_topics:
+            current_title = sop_data.get("procedure_title", "")
+            # Only qualify if not already qualified
+            if "Not Found" not in current_title:
+                short = ", ".join(
+                    topic.title() for topic in not_found_topics[:2]
+                )
+                sop_data["procedure_title"] = f"{current_title} ({short} Not Found)"
+
+        # Persist subtopic scores for downstream use
+        sop_data["subtopic_coverage"] = subtopic_scores
+
     return sop_data
 
 
 def extract_sop(
     query: str,
-    retrieved_chunks: list[SearchResult | dict],
+    retrieved_chunks: Sequence[SearchResult | dict],
     image_context: list[str] | None = None,
     category: str = "general",
 ) -> dict:
@@ -727,11 +1039,42 @@ def extract_sop(
         manual_vocab=dynamic_vocab,
     )
 
+    # ── Populate subtopic searched_pages from retrieved chunks ─────────────
+    subtopic_scores = coverage_info.get("subtopic_coverage", [])
+    retrieved_pages = sorted(set(
+        c.page_num if isinstance(c, SearchResult) else c.get("page", -1)
+        for c in retrieved_chunks
+    ))
+    for st_score in subtopic_scores:
+        st_score["searched_pages"] = retrieved_pages
+        # Regenerate note with actual page numbers (initial scoring used [])
+        pages_str = ", ".join(str(p) for p in retrieved_pages)
+        if st_score["status"] == "not_found" and st_score.get("note"):
+            st_score["note"] = (
+                f"No explicit {st_score['label']} content was identified in the "
+                f"retrieved sections (pages {pages_str})."
+            )
+        elif st_score["status"] == "partial" and st_score.get("note"):
+            st_score["note"] = (
+                f"Only partial evidence for {st_score['label']} was found. "
+                f"Missing concepts: {', '.join(st_score.get('missing', []))}."
+            )
+
     print(
         f"  [Stage 6b] Topic Evidence Coverage: {coverage_info['coverage']} "
         f"(Matched: {coverage_info['matched']}, Missing: {coverage_info['missing']}, "
         f"Missing Critical: {coverage_info['missing_critical']})"
     )
+
+    # ── Log subtopic decomposition if multi-topic ─────────────────────────
+    if subtopic_scores:
+        for st_s in subtopic_scores:
+            status_icon = {"not_found": "\u2717", "partial": "\u25d0", "covered": "\u2713"}.get(st_s["status"], "?")
+            print(
+                f"  [Stage 6b] Sub-topic '{st_s['label']}': "
+                f"{status_icon} {st_s['status']} (coverage: {st_s['coverage']:.2f}, "
+                f"matched: {st_s['matched']}, missing: {st_s['missing']})"
+            )
 
     if not is_valid:
         print(f"  [WARN] Pre-LLM Validation Failed! Missing critical terms: {coverage_info['missing_critical']} (Coverage: {coverage_info['coverage']}). Rejecting prior to LLM call.")
@@ -775,10 +1118,13 @@ def extract_sop(
         "3. NO HALLUCINATED PROCEDURES: If the retrieved context does NOT contain a specific procedure for the query, "
         "explicitly state 'The retrieved manual sections do not contain a complete procedure for this query' in procedure_title "
         "and leave steps empty [] rather than inventing speculative maintenance steps.\n"
-        "4. STRICT JSON FORMAT: Output MUST be valid JSON adhering strictly to the schema below without markdown wrappers or codeblocks.\n\n"
+        "4. COVERAGE GAP HONESTY: If a COVERAGE GAP ADVISORY is present in the user context, "
+        "you MUST NOT generate unsupported procedures for those topics. Instead, include a "
+        "'coverage_gaps' array in your JSON output for any sub-topics that lack evidence.\n"
+        "5. STRICT JSON FORMAT: Output MUST be valid JSON adhering strictly to the schema below without markdown wrappers or codeblocks.\n\n"
         "JSON SCHEMA:\n"
         "{\n"
-        '  "procedure_title": "Concise Procedure Title",\n'
+        '  "procedure_title": "Concise Procedure Title (only for topics WITH evidence)",\n'
         '  "machine_type": "Specific Machine / System Type",\n'
         '  "steps": [\n'
         "    {\n"
@@ -792,15 +1138,30 @@ def extract_sop(
         '      "evidence": "Brief supporting quote or excerpt from the context"\n'
         "    }\n"
         "  ],\n"
+        '  "coverage_gaps": [\n'
+        "    {\n"
+        '      "topic": "Sub-topic that lacks evidence",\n'
+        '      "status": "not_found",\n'
+        '      "searched_pages": [8, 9, 367],\n'
+        '      "note": "Brief explanation of what was not found"\n'
+        "    }\n"
+        "  ],\n"
         '  "safety_warnings": ["Warning statement 1", "Warning statement 2"],\n'
         '  "estimated_duration": "Estimated time (e.g. 15-30 minutes)"\n'
         "}\n"
     )
 
+    # ── Build coverage gap advisory for user prompt injection ─────────────
+    coverage_advisory = build_coverage_gap_advisory(subtopic_scores)
+
     user_prompt = (
         f"Target Manual: {target_manual_name}\n"
         f"Category: {category}\n"
         f"User Query: {query}\n\n"
+    )
+    if coverage_advisory:
+        user_prompt += f"{coverage_advisory}\n\n"
+    user_prompt += (
         f"--- MANUAL TEXT CONTEXT ---\n"
         f"{text_context}\n\n"
         f"--- VISUAL TABLE & DIAGRAM CONTEXT ---\n"
@@ -835,7 +1196,10 @@ def extract_sop(
             sop_data = parse_json_response(raw_content)
 
             # Apply domain-safety validation and evidence coverage check
-            sanitized_sop = validate_and_sanitize_sop(sop_data, target_manual_name, retrieved_chunks, query=query)
+            sanitized_sop = validate_and_sanitize_sop(
+                sop_data, target_manual_name, retrieved_chunks,
+                query=query, subtopic_scores=subtopic_scores,
+            )
             return sanitized_sop
 
         except Exception as exc:
@@ -844,16 +1208,24 @@ def extract_sop(
 
     print(f"  [WARN] All LLM API providers failed or exhausted quota ({last_error}). Generating offline fallback SOP.")
     fallback = _generate_offline_fallback_sop(query, retrieved_chunks)
-    return validate_and_sanitize_sop(fallback, target_manual_name, retrieved_chunks, query=query)
+    return validate_and_sanitize_sop(
+        fallback, target_manual_name, retrieved_chunks,
+        query=query, subtopic_scores=subtopic_scores,
+    )
 
 
-def _generate_offline_fallback_sop(query: str, retrieved_chunks: list[SearchResult | dict]) -> dict:
+def _generate_offline_fallback_sop(query: str, retrieved_chunks: Sequence[SearchResult | dict]) -> dict:
     """Generates structured fallback SOP from retrieved text chunks when API quota is exhausted."""
     first_chunk = retrieved_chunks[0] if retrieved_chunks else None
     manual_name = first_chunk.manual_name if isinstance(first_chunk, SearchResult) else "Industrial Manual"
     page_num = first_chunk.page_num if isinstance(first_chunk, SearchResult) else 1
 
-    text_excerpt = first_chunk.chunk_text[:300] if first_chunk else "Refer to manual documentation."
+    if isinstance(first_chunk, SearchResult):
+        text_excerpt = first_chunk.chunk_text[:300]
+    elif isinstance(first_chunk, dict):
+        text_excerpt = str(first_chunk.get("text", "Refer to manual documentation."))[:300]
+    else:
+        text_excerpt = "Refer to manual documentation."
 
     return {
         "procedure_title": f"Procedure for {query.title()}",

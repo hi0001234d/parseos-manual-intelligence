@@ -7,7 +7,7 @@ Formats extracted SOP JSON data into rich, readable terminal UI output.
 import sys
 
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore
 
 try:
     from colorama import Fore, Style, init  # type: ignore[import-untyped]
@@ -102,6 +102,29 @@ def format_sop_output(sop_data: dict, knowledge_id: str | None = None) -> str:
             lines.append(f"          {Fore.MAGENTA}Tool Required: {tool}{Style.RESET_ALL}")
         if evidence:
             lines.append(f"          {Fore.BLUE}Evidence: \"{evidence[:120]}\"{Style.RESET_ALL}")
+
+    # ── Coverage Gaps Section ────────────────────────────────────────────────
+    coverage_gaps = sop_data.get("coverage_gaps", [])
+    if coverage_gaps:
+        lines.append(f"\n{Style.BRIGHT}{Fore.YELLOW}[COVERAGE GAPS]{Style.RESET_ALL}")
+        lines.append("-" * 70)
+        for gap in coverage_gaps:
+            status = gap.get("status", "not_found")
+            topic = gap.get("topic", "Unknown topic")
+            note = gap.get("note", "")
+            searched = gap.get("searched_pages", [])
+            searched_str = ", ".join(str(p) for p in searched) if searched else "N/A"
+
+            if status == "not_found":
+                lines.append(f"\n  {Fore.RED}\u26a0 NOT FOUND{Style.RESET_ALL}")
+            else:
+                lines.append(f"\n  {Fore.YELLOW}\u25d0 PARTIALLY COVERED{Style.RESET_ALL}")
+
+            lines.append(f"    {Style.BRIGHT}Topic:{Style.RESET_ALL} {topic}")
+            lines.append(f"    {Fore.CYAN}Searched pages:{Style.RESET_ALL} {searched_str}")
+            if note:
+                lines.append(f"    {Fore.WHITE}Note:{Style.RESET_ALL} {note}")
+            lines.append(f"    {Fore.GREEN}Recommendation:{Style.RESET_ALL} Search additional manual sections or consult the full service manual.")
 
     lines.append("\n" + "=" * 70 + "\n")
     return "\n".join(lines)
