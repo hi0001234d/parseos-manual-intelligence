@@ -35,8 +35,9 @@ from src.pdf_parser import get_page_count
 from src.engine import SearchEngine
 from src.sop_extractor import resolve_visual_context, extract_sop
 from src.knowledge_layer import save_to_knowledge_layer
-from src.chat_formatter import format_sop_output
+from src.chat_formatter import format_sop_output, format_orchestrated_response
 from src.manual_metadata import load_all_known_vocab
+from src.response_orchestrator import orchestrate_response
 
 
 def run_pipeline(
@@ -47,6 +48,8 @@ def run_pipeline(
     query_only: bool = False,
     force_ingest: bool = False,
     filter_manual: str | None = None,
+    save_output: bool = True,
+    interactive_chat: bool = False,
 ) -> dict | None:
     """
     Executes the ParseOS SOP Pipeline according to mode flags.
@@ -75,18 +78,75 @@ def run_pipeline(
                 else:
                     print(f"[Pipeline] Using existing ingested index for manual: {manual_name}")
             else:
-                # Treat manual_path as manual name or substring filter for ingested index
-                available_manuals = engine.list_manuals()
-                matched = None
-                for m in available_manuals:
-                    if manual_path.lower() in m.lower():
-                        matched = m
-                        break
-                filter_manual = matched or manual_path
-                print(f"[Pipeline] Filtering search by manual: '{filter_manual}'")
+                # DEF-3: Early rejection for file-like paths that don't exist on disk.
+                # A path is "file-like" if it has a file extension or contains path separators.
+                looks_like_file = (
+                    "." in Path(manual_path).name
+                    or "/" in manual_path
+                    or "\\" in manual_path
+                )
+                if looks_like_file:
+                    # Check whether it matches an already-indexed manual name
+                    available_manuals = engine.list_manuals()
+                    matched = next(
+                        (m for m in available_manuals if manual_path.lower() in m.lower()),
+                        None,
+                    )
+                    if matched is None:
+                        raise ValueError(
+                            f"Manual not found: '{manual_path}' does not exist on disk "
+                            f"and is not indexed in the knowledge base.\n"
+                            f"Available manuals: {', '.join(available_manuals) if available_manuals else 'none (ingest first)'}."
+                        )
+                    filter_manual = matched
+                    print(f"[Pipeline] Filtering search by indexed manual: '{filter_manual}'")
+                else:
+                    # Plain substring filter (no path separators / extension)
+                    available_manuals = engine.list_manuals()
+                    matched = next(
+                        (m for m in available_manuals if manual_path.lower() in m.lower()),
+                        None,
+                    )
+                    filter_manual = matched or manual_path
+                    print(f"[Pipeline] Filtering search by manual: '{filter_manual}'")
 
         if not query:
             raise ValueError("--query string required for query execution.")
+
+        # ── Manual selection prompt (CLI mode, no --manual specified) ────────
+        # When the user hasn't pinned a specific manual, do a quick broad scan
+        # to surface the most relevant manuals and let them pick one.
+        if filter_manual is None:
+            broad_hits = engine.search(query, top_k=15)
+            if broad_hits:
+                seen: list[str] = []
+                for r in broad_hits:
+                    if r.manual_name not in seen:
+                        seen.append(r.manual_name)
+
+                if len(seen) > 1:
+                    print(f"\n  [ParseOS] Multiple manuals may contain relevant information for this query.")
+                    print(f"  Please select the manual you want to search:\n")
+                    for idx, m in enumerate(seen, 1):
+                        print(f"    {idx}. {m}")
+                    print(f"    {len(seen) + 1}. Search ALL manuals")
+
+                    while True:
+                        selection = input(f"\n  Enter a number (1-{len(seen) + 1}): ").strip()
+                        if selection.isdigit():
+                            choice = int(selection)
+                            if 1 <= choice <= len(seen):
+                                filter_manual = seen[choice - 1]
+                                print(f"  -> Targeting manual: '{filter_manual}'\n")
+                                break
+                            elif choice == len(seen) + 1:
+                                print("  -> Searching ALL manuals.\n")
+                                break
+                        print(f"  Invalid selection. Please enter a number between 1 and {len(seen) + 1}.")
+                else:
+                    # Only one manual matched — auto-select it
+                    filter_manual = seen[0]
+                    print(f"  -> Auto-selected the only relevant manual: '{filter_manual}'\n")
 
         print(f"\n[Pipeline Stage 5] Running vector similarity search for query: '{query}'")
         retrieved_chunks = engine.search(query, top_k=3, filter_manual=filter_manual)
@@ -106,11 +166,39 @@ def run_pipeline(
 
         # Stage 7: Knowledge Layer Storage
         print(f"\n[Pipeline Stage 7] Exporting to ParseOS Knowledge Layer…")
-        kl_path, kl_entry = save_to_knowledge_layer(sop_data, manual_name=source_manual_name, category=category, query=query)
+        kl_path, kl_entry = None, None
+        if save_output:
+            # DEF-3: Skip saving when evidence is insufficient and no chunks were retrieved
+            skip_save = (
+                sop_data.get("is_insufficient", False)
+                and len(retrieved_chunks) == 0
+            )
+            if skip_save:
+                print("  [INFO] Skipping Knowledge Layer save — no chunks retrieved for this manual path.")
+                kl_entry = {"knowledge_id": "N/A"}
+            else:
+                kl_path, kl_entry = save_to_knowledge_layer(sop_data, manual_name=source_manual_name, category=category, query=query)
+        else:
+            print("  [INFO] --no-save active: skipping Knowledge Layer output.")
+            kl_entry = {"knowledge_id": "N/A"}
+
+        # Stage 6c: Response Orchestration
+        print(f"\n[Pipeline Stage 6c] Building orchestrated response (short answer + options)...")
+        combined_text = "\n\n".join(r.chunk_text for r in retrieved_chunks)
+        result_meta   = [
+            {"manual": r.manual_name, "page_number": r.page_num}
+            for r in retrieved_chunks
+        ]
+        orchestrated = orchestrate_response(
+            query=query,
+            sop_data=sop_data,
+            retrieved_text=combined_text,
+            result_metadata=result_meta,
+        )
 
         # Render Formatted Output
-        formatted_output = format_sop_output(sop_data, knowledge_id=kl_entry["knowledge_id"])
-        print(formatted_output)
+        # interactive=False for --query CLI mode (prints both options in full)
+        format_orchestrated_response(orchestrated, interactive=interactive_chat)
 
         return kl_entry
 
@@ -264,6 +352,74 @@ def _is_valid_query(text: str) -> tuple[bool, str]:
     return True, ""
 
 
+# ── DEF-1: Safety intent guard ────────────────────────────────────────────────
+
+# Bypass / defeat verbs — describes the intent to circumvent a safety system
+_UNSAFE_VERBS: frozenset[str] = frozenset({
+    "bypass", "bypassing", "bypassed",
+    "disable", "disabling", "disabled",
+    "override", "overriding", "overridden",
+    "circumvent", "circumventing",
+    "defeat", "defeating", "defeated",
+    "skip", "skipping",
+    "ignore", "ignoring",
+    "force", "forcing",
+    "suppress", "suppressing",
+    "deactivate", "deactivating",
+    "trick", "tricking",
+    "shortcut",
+})
+
+# Safety system nouns that must not be bypassed
+_SAFETY_NOUNS: frozenset[str] = frozenset({
+    "protective stop", "protection stop",
+    "safety stop", "emergency stop", "e-stop", "estop",
+    "interlock", "interlocks",
+    "safety relay", "safety relays",
+    "safety circuit", "safety circuits",
+    "guard", "guarding",
+    "lockout", "tagout", "loto",
+    "safety limit", "safety limits",
+    "safeguard", "safeguards",
+    "safe torque off", "sto",
+    "safety function", "safety functions",
+    "safety gate", "safety gates",
+    "light curtain", "light curtains",
+    "door interlock",
+})
+
+
+def _is_unsafe_intent(text: str) -> tuple[bool, str]:
+    """
+    DEF-1: Detects queries that request bypassing, disabling, or overriding
+    an industrial safety system.
+
+    Returns (is_unsafe: bool, refusal_message: str).
+    A True result must prevent retrieval and LLM generation entirely.
+    """
+    lower = text.lower()
+    tokens = set(re.findall(r'\b[a-z]+\b', lower))
+
+    has_unsafe_verb = bool(tokens & _UNSAFE_VERBS)
+    has_safety_noun = any(noun in lower for noun in _SAFETY_NOUNS)
+
+    if has_unsafe_verb and has_safety_noun:
+        matched_verb = next(v for v in _UNSAFE_VERBS if v in tokens)
+        matched_noun = next(n for n in _SAFETY_NOUNS if n in lower)
+        return True, (
+            f"\n  [ParseOS SAFETY REFUSAL]\n"
+            f"  This system cannot provide instructions to '{matched_verb}' a '{matched_noun}'.\n"
+            f"  Bypassing or disabling industrial safety systems is UNSAFE and contrary to\n"
+            f"  ISO 13849, IEC 62061, and machine-specific safety standards.\n\n"
+            f"  If you believe this safety system has triggered incorrectly:\n"
+            f"    • Consult the official service manual for the safety reset procedure.\n"
+            f"    • Contact a qualified safety engineer or the manufacturer.\n"
+            f"    • Do NOT attempt to override safety systems without proper authorisation.\n"
+        )
+
+    return False, ""
+
+
 
 
 def run_interactive_chat():
@@ -273,12 +429,19 @@ def run_interactive_chat():
     print("  ParseOS Manual Intelligence Engine -- Interactive Chat Mode (v2.0)")
     print("=" * 70)
 
+    total_chunks = engine.total_chunks()
     manuals = engine.list_manuals()
-    print(f"Knowledge Base Status: {engine.total_chunks()} total chunks across {len(manuals)} manual(s).")
+    print(f"Knowledge Base Status: {total_chunks} total chunks across {len(manuals)} manual(s).")
     if manuals:
         print("Available manuals:", ", ".join(manuals))
-    else:
+    elif total_chunks == 0:
+        # DEF-2: Only warn "empty" when the chunk count is also zero.
+        # list_manuals() can return [] under certain ChromaDB metadata query
+        # conditions even when chunks exist; checking total_chunks() avoids
+        # the contradictory "179747 chunks across 0 manuals" display.
         print("[WARN] Knowledge base is currently empty! Please ingest manuals first using `python ingest_all.py`.")
+    else:
+        print("[INFO] Manual metadata index is rebuilding or unavailable; chunk data is present.")
 
     print("\nType your question (e.g. 'motor overheating procedure') or 'exit' / 'quit' to stop.\n")
 
@@ -304,6 +467,14 @@ def run_interactive_chat():
                 else:
                     selected_manual = target
                     print(f"  Switched target manual filter to: {selected_manual}")
+                continue
+
+            # ── Safety intent guard (DEF-1) ──────────────────────────────────
+            # Must run BEFORE _is_valid_query to ensure bypass attempts are
+            # refused even for otherwise well-formed industrial queries.
+            unsafe, safety_msg = _is_unsafe_intent(user_input)
+            if unsafe:
+                print(safety_msg)
                 continue
 
             # ── Query validation ─────────────────────────────────────────────
@@ -356,7 +527,14 @@ def run_interactive_chat():
                             continue
 
             # Run query through pipeline
-            run_pipeline(query=user_input, filter_manual=current_target, query_only=True)
+            result = run_pipeline(query=user_input, filter_manual=current_target, query_only=True, interactive_chat=True)
+
+            # In chat mode the pipeline already printed the orchestrated response.
+            # run_pipeline returns kl_entry (the knowledge layer dict); nothing
+            # extra to render here — format_orchestrated_response was called
+            # inside run_pipeline with interactive=False.  If you want interactive
+            # option selection in chat mode, swap interactive=False → True in
+            # run_pipeline(), or add the call here after result is returned.
 
         except KeyboardInterrupt:
             print("\nExiting ParseOS Chat Mode.")
@@ -374,6 +552,8 @@ def main():
     parser.add_argument("--query-only", action="store_true", help="Run query retrieval & extraction (Stages 5-7) only.")
     parser.add_argument("--force", action="store_true", help="Force re-ingest manual even if already stored.")
     parser.add_argument("--chat", action="store_true", help="Launch interactive CLI chat mode.")
+    # DEF-5: --no-save skips Stage 7 Knowledge Layer output
+    parser.add_argument("--no-save", action="store_true", help="Execute query without writing Knowledge Layer JSON output.")
 
     args = parser.parse_args()
 
@@ -388,6 +568,7 @@ def main():
             ingest_only=args.ingest_only,
             query_only=args.query_only,
             force_ingest=args.force,
+            save_output=not args.no_save,
         )
 
     """ ---------- DEBUG MODE ----------

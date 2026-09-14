@@ -2,6 +2,9 @@
 chat_formatter.py — Terminal Output Renderer for ParseOS SOP Engine (v2.0)
 =========================================================================
 Formats extracted SOP JSON data into rich, readable terminal UI output.
+
+v2.1 — Added format_orchestrated_response() for Stage 6c orchestrated
+        responses (short answer + Option 1 / Option 2 interactive flow).
 """
 
 import sys
@@ -128,3 +131,151 @@ def format_sop_output(sop_data: dict, knowledge_id: str | None = None) -> str:
 
     lines.append("\n" + "=" * 70 + "\n")
     return "\n".join(lines)
+
+
+# ── Stage 6c: Orchestrated Response Renderer ─────────────────────────────────
+
+def _render_reference_card(elem: dict, expanded: bool = False) -> str:
+    """
+    Renders the Option 2 clickable reference card.
+
+    Collapsed (default) — shows only title + page.
+    Expanded (after user action) — reveals reference_text.
+    """
+    title = elem.get("display_title", "Manual Reference")
+    page  = elem.get("page_number")
+    manual = elem.get("source_manual", "Manual")
+    ref_text = elem.get("reference_text", "")
+
+    page_display = f"Page {page}" if page else "Page N/A"
+    border = "─" * 52
+
+    lines = []
+    lines.append(f"  ┌{border}┐")
+    lines.append(f"  │  {Fore.CYAN}📄  {Style.BRIGHT}{title:<45}{Style.RESET_ALL}  │")
+    lines.append(f"  │      {Fore.WHITE}{page_display} — {manual:<35}{Style.RESET_ALL}│")
+
+    if not expanded:
+        lines.append(f"  │{' ' * 40}{Fore.GREEN}[Press Enter to view]{Style.RESET_ALL} │")
+        lines.append(f"  └{border}┘")
+    else:
+        lines.append(f"  │{'─' * 52}│")
+        # Word-wrap reference text at ~50 chars per line
+        import textwrap
+        wrapped = textwrap.wrap(f'"{ref_text}"', width=50)
+        for line in wrapped:
+            lines.append(f"  │  {Fore.WHITE}{line:<50}{Style.RESET_ALL}  │")
+        lines.append(f"  └{border}┘")
+
+    return "\n".join(lines)
+
+
+def format_orchestrated_response(
+    orchestrated: dict,
+    interactive: bool = True,
+) -> None:
+    """
+    Renders a Stage 6c orchestrated response to the terminal.
+
+    Args:
+        orchestrated : dict returned by orchestrate_response()
+        interactive  : If True (chat mode), prompts user to pick an option
+                       and expands Option 2 on demand.
+                       If False (CLI mode), prints both options in full.
+    """
+    if not orchestrated:
+        return
+
+    query        = orchestrated.get("query", "")
+    short_answer = orchestrated.get("short_answer", "")
+    options      = orchestrated.get("options")
+
+    print("\n" + "=" * 70)
+    print(f"{Style.BRIGHT}{Fore.CYAN}ParseOS Response{Style.RESET_ALL}")
+    if query:
+        print(f"{Fore.WHITE}Query: {query}{Style.RESET_ALL}")
+    print("=" * 70)
+
+    # ── Short direct answer ───────────────────────────────────────────────
+    print(f"\n{Style.BRIGHT}{Fore.GREEN}▶  Direct Answer:{Style.RESET_ALL}")
+    print(f"   {short_answer}")
+
+    if not options:
+        # INSUFFICIENT_EVIDENCE path
+        print(f"\n{Fore.YELLOW}No procedure options available for this query.{Style.RESET_ALL}")
+        print("\n" + "=" * 70 + "\n")
+        return
+
+    opt1 = options.get("option_1", {})
+    opt2 = options.get("option_2", {})
+
+    if not interactive:
+        # ── Non-interactive (CLI --query mode): print both in full ────────
+        print(f"\n{Style.BRIGHT}{Fore.CYAN}Option 1 — {opt1.get('label', 'Explain in Detail')}:{Style.RESET_ALL}")
+        print("-" * 70)
+        print(opt1.get("content", ""))
+
+        print(f"\n{Style.BRIGHT}{Fore.CYAN}Option 2 — {opt2.get('label', 'Reference to Actual Document')}:{Style.RESET_ALL}")
+        elem = opt2.get("clickable_element", {})
+        print(_render_reference_card(elem, expanded=False))
+        print()
+        print(_render_reference_card(elem, expanded=True))
+        print("\n" + "=" * 70 + "\n")
+        return
+
+    # ── Interactive (chat mode): prompt for option choice ─────────────────
+    import sys
+    
+    opt1_available = True
+    opt2_available = True
+
+    while opt1_available or opt2_available:
+        lines_printed = 0
+        
+        print(f"\n{Style.BRIGHT}Choose an option:{Style.RESET_ALL}")
+        lines_printed += 2
+        
+        if opt1_available:
+            print(f"  {Fore.CYAN}1.{Style.RESET_ALL} {opt1.get('label', 'Explain in Detail')}")
+            lines_printed += 1
+            
+        if opt2_available:
+            print(f"  {Fore.CYAN}2.{Style.RESET_ALL} {opt2.get('label', 'Reference to Actual Document')}")
+            lines_printed += 1
+            
+        print()
+        lines_printed += 1
+        
+        try:
+            valid_choices = []
+            if opt1_available: valid_choices.append("1")
+            if opt2_available: valid_choices.append("2")
+            prompt_str = f"  Enter {' or '.join(valid_choices)} (or press Enter to skip): "
+            choice = input(prompt_str).strip()
+            lines_printed += 1
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+            
+        # Erase the menu lines
+        sys.stdout.write(f"\033[{lines_printed}A") 
+        sys.stdout.write("\033[J")
+        sys.stdout.flush()
+
+        if not choice:
+            print(f"  {Fore.WHITE}Skipped option selection.{Style.RESET_ALL}")
+            break
+            
+        if choice == "1" and opt1_available:
+            print(f"\n{Style.BRIGHT}{Fore.GREEN}[Detailed SOP]{Style.RESET_ALL}")
+            print("-" * 70)
+            print(opt1.get("content", ""))
+            opt1_available = False
+
+        elif choice == "2" and opt2_available:
+            elem = opt2.get("clickable_element", {})
+            print(f"\n{Style.BRIGHT}{Fore.CYAN}[Document Reference]{Style.RESET_ALL}")
+            print(_render_reference_card(elem, expanded=True))
+            opt2_available = False
+            
+    print("\n" + "=" * 70 + "\n")

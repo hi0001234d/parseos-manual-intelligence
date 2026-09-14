@@ -9,7 +9,7 @@ knowledge_layer/sops/
 knowledge_layer/manual_metadata/
 data/page_images/
 data/vlm_cache/
-
+tests/
 # ── Python cache ─────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc

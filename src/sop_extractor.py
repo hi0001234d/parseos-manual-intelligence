@@ -25,13 +25,8 @@ import requests  # type: ignore[import-untyped]
 from src.config import (
     IMAGE_HEAVY_THRESHOLD,
     VLM_CACHE_PATH,
-    OPENAI_API_KEY,
-    OPENROUTER_API_KEY,
-    GEMINI_API_KEY,
     GROQ_API_KEY,
-    LLM_MODEL,
     GROQ_MODEL,
-    INGEST_VLM_MODEL,
     PREDICT_API_URL,
     SUBTOPIC_NOT_FOUND_THRESHOLD,
     SUBTOPIC_PARTIAL_THRESHOLD,
@@ -95,16 +90,24 @@ def extract_predict_text(res: Any) -> str:
 
 def _get_available_providers(is_vision: bool = False) -> list[dict]:
     """
-    Returns list of configured API provider configurations in order of priority:
-    1. Groq API     (llama-3.3-70b-versatile via OpenAI-compat endpoint — for text reasoning)
-    2. Gemini API   (gemini-2.0-flash via OpenAI-compat endpoint)
-    3. OpenRouter API (OpenAI-compat endpoint)
-    4. OpenAI API   (native OpenAI endpoint)
+    Returns LLM provider list.
+
+    SOP text reasoning (is_vision=False):
+        → Groq only (llama-3.3-70b-versatile via OpenAI-compat endpoint)
+
+    Visual processing (is_vision=True):
+        → Empty list — handled exclusively by the local Visual Predictor API
+          (POST /predict).  No cloud VLM fallback is attempted.
     """
+    # Vision is handled by the local /predict API in resolve_visual_context().
+    # Return an empty list so no cloud VLM is ever called.
+    if is_vision:
+        return []
+
     providers = []
 
-    # ── Groq via OpenAI-compat endpoint ───────────────────────────────────────
-    if GROQ_API_KEY and not is_vision:
+    # ── Groq only — sole LLM provider for SOP text reasoning ─────────────────
+    if GROQ_API_KEY:
         providers.append({
             "name": "groq",
             "client": OpenAI(
@@ -115,38 +118,6 @@ def _get_available_providers(is_vision: bool = False) -> list[dict]:
             "provider_type": "openai",
         })
 
-    # ── Gemini via OpenAI-compat endpoint ─────────────────────────────────────
-    if GEMINI_API_KEY:
-        providers.append({
-            "name": "gemini (2.0-flash)",
-            "client": OpenAI(
-                api_key=GEMINI_API_KEY,
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-            ),
-            "model": "gemini-2.0-flash",
-            "provider_type": "openai",
-        })
-
-    # ── OpenRouter ────────────────────────────────────────────────────────────
-    if OPENROUTER_API_KEY:
-        providers.append({
-            "name": "openrouter",
-            "client": OpenAI(
-                api_key=OPENROUTER_API_KEY,
-                base_url="https://openrouter.ai/api/v1"
-            ),
-            "model": f"openai/{INGEST_VLM_MODEL if is_vision else LLM_MODEL}",
-            "provider_type": "openai",
-        })
-
-    # ── OpenAI ────────────────────────────────────────────────────────────────
-    if OPENAI_API_KEY:
-        providers.append({
-            "name": "openai",
-            "client": OpenAI(api_key=OPENAI_API_KEY),
-            "model": INGEST_VLM_MODEL if is_vision else LLM_MODEL,
-            "provider_type": "openai",
-        })
 
     return providers
 
@@ -409,6 +380,13 @@ CONVERSATIONAL_TERMS = {
     # state / condition words common in conversational queries
     "state", "condition", "situation", "status", "case",
     "including", "related", "possible", "likely",
+    # DEF-6: high-frequency filler words that inflate coverage denominators
+    # (present in queries, rarely in technical chunk text as standalone terms)
+    "are", "does", "this", "give", "explain", "their", "its",
+    "was", "been", "has", "have", "had", "not", "any",
+    "all", "both", "each", "such", "about", "over", "than",
+    "too", "very", "just", "you", "your", "our", "they",
+    "them", "one", "two", "three", "four", "five",
 }
 
 # Merge conversational terms into stop-word set so they are excluded at
@@ -433,8 +411,13 @@ STOP_WORDS |= CONVERSATIONAL_TERMS
 #     ("does not build pressure") rather than a named component noun.
 UNIVERSAL_CRITICAL: frozenset[str] = frozenset({
     "bearing", "spindle", "servo", "encoder", "hydraulic",
-    "pump", "valve", "motor", "relay", "fuse", "sensor",
+    "pump", "valve", "relay", "fuse", "sensor",
     "brake", "gasket", "seal", "shaft",
+    # NOTE: "motor" is intentionally excluded from the hard-fail set.
+    # In compound queries ("spindle motor", "servo motor", "drive motor")
+    # it functions as a modifier adjective, not an independent component.
+    # Its absence from evidence is already penalised through coverage
+    # scoring (Layer 2 / dynamic vocab) without issuing a false hard-fail.
 })
 
 # Backward-compatibility alias — any internal code still referencing
@@ -819,15 +802,23 @@ def validate_topic_evidence(
         "subtopic_coverage": subtopic_scores,
     }
 
-    # Hard-fail: a universal safety-critical component is absent from evidence
+    # Hard-fail: a universal safety-critical component is absent from evidence.
+    # This check is UNCONDITIONAL — no bypass can skip it.
     if missing_critical:
         return False, info
 
-    # Soft-fail: only when coverage is very low AND a critical term is also
-    # missing. A lone low-coverage score (caused by conversational phrasing
-    # after Tier-0 stripping) is NOT sufficient to block the query.
-    if coverage < 0.35 and missing_critical:
-        return False, info
+    # Soft-fail: coverage is very low (< 0.20).
+    # DEF-4: Direct-text-match bypass — if any query content word appears
+    # ≥2 times in the evidence blob the query is clearly on-topic, so skip
+    # this soft-fail.  The hard-fail above is never touched by this bypass.
+    if coverage < 0.20:
+        high_freq_match = any(
+            evidence_blob.count(t) >= 2
+            for t in coverage_terms
+            if t not in STOP_WORDS
+        )
+        if not high_freq_match:
+            return False, info
 
     return True, info
 
@@ -1191,7 +1182,7 @@ def extract_sop(
                     max_tokens=2000,
                 )
 
-            response = retry_with_backoff(_call_llm, max_retries=1, initial_delay=2.0)
+            response = retry_with_backoff(_call_llm, max_retries=3, initial_delay=2.0)
             raw_content = _extract_content(response, p_type).strip()
             sop_data = parse_json_response(raw_content)
 
