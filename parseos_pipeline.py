@@ -49,7 +49,7 @@ def run_pipeline(
     force_ingest: bool = False,
     filter_manual: str | None = None,
     save_output: bool = True,
-    interactive_chat: bool = False,
+    interactive_chat: bool = True,
 ) -> dict | None:
     """
     Executes the ParseOS SOP Pipeline according to mode flags.

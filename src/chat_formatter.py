@@ -209,6 +209,10 @@ def format_orchestrated_response(
     opt1 = options.get("option_1", {})
     opt2 = options.get("option_2", {})
 
+    import sys
+    if not sys.stdin.isatty():
+        interactive = False
+
     if not interactive:
         # ── Non-interactive (CLI --query mode): print both in full ────────
         print(f"\n{Style.BRIGHT}{Fore.CYAN}Option 1 — {opt1.get('label', 'Explain in Detail')}:{Style.RESET_ALL}")
