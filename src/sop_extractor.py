@@ -1003,11 +1003,13 @@ def extract_sop(
     """
     from src.manual_metadata import get_combined_vocab  # local import avoids circular deps
 
-    first_chunk = retrieved_chunks[0] if retrieved_chunks else None
-    target_manual_name = (
-        first_chunk.manual_name if isinstance(first_chunk, SearchResult)
-        else (first_chunk.get("manual", "industrial_manual") if isinstance(first_chunk, dict) else "industrial_manual")
-    )
+    target_manual_name = "industrial_manual"
+    if retrieved_chunks:
+        first_chunk = retrieved_chunks[0]
+        if isinstance(first_chunk, SearchResult):
+            target_manual_name = first_chunk.manual_name
+        elif isinstance(first_chunk, dict):
+            target_manual_name = first_chunk.get("manual", "industrial_manual")
 
     # ── Pre-LLM Topic Evidence Validation Pass ────────────────────────────────
     evidence_texts = []
@@ -1207,17 +1209,22 @@ def extract_sop(
 
 def _generate_offline_fallback_sop(query: str, retrieved_chunks: Sequence[SearchResult | dict]) -> dict:
     """Generates structured fallback SOP from retrieved text chunks when API quota is exhausted."""
-    first_chunk = retrieved_chunks[0] if retrieved_chunks else None
-    manual_name = first_chunk.manual_name if isinstance(first_chunk, SearchResult) else "Industrial Manual"
-    page_num = first_chunk.page_num if isinstance(first_chunk, SearchResult) else 1
+    manual_name = "Industrial Manual"
+    page_num = 1
+    text_excerpt = "Refer to manual documentation."
 
-    if isinstance(first_chunk, SearchResult):
-        text_excerpt = first_chunk.chunk_text[:300]
-    elif isinstance(first_chunk, dict):
-        text_excerpt = str(first_chunk.get("text", "Refer to manual documentation."))[:300]
-    else:
-        text_excerpt = "Refer to manual documentation."
-
+    if retrieved_chunks:
+        first_chunk = retrieved_chunks[0]
+        if isinstance(first_chunk, SearchResult):
+            manual_name = first_chunk.manual_name
+            page_num = first_chunk.page_num
+            text_excerpt = first_chunk.chunk_text[:300]
+        elif isinstance(first_chunk, dict):
+            manual_name = first_chunk.get("manual", "Industrial Manual")
+            page_num = first_chunk.get("page", 1)
+            text_excerpt = str(
+    first_chunk.get("chunk_text", first_chunk.get("text", "Refer to manual documentation."))
+)[:300]
     return {
         "procedure_title": f"Procedure for {query.title()}",
         "machine_type": f"System in {manual_name}",
